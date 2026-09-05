@@ -50,10 +50,13 @@ ROT_SIGN = {"wrist": -1.0}                      # 고정캠은 probe 가 rot_sig
 DET = {"wrist":  {"amin_wall": 150, "feat_area": (60, 1400), "near": 80.0, "search": 140.0, "ranges": None},
        "newcam": {"amin_wall": 40,  "feat_area": (20, 1400), "near": 60.0, "search": 120.0,
                   "ranges": {"blue": ((95, 150, 70), (118, 255, 255)), "yellow": ((15, 80, 110), (40, 255, 255)),
-                             "red": ((160, 120, 80), (180, 255, 255))}},
+                             "red": [((0, 100, 80), (10, 255, 255)), ((160, 100, 80), (180, 255, 255))]},
+                  "exclude": [(250, 400, 350, 480)]},          # 왼쪽 빨간 케이블(고정) 오검출 제외
        "side":   {"amin_wall": 12,  "feat_area": (10, 400), "near": 30.0, "search": 60.0,
+                  # 측면 빨간 기둥점 H 0~5(라이브 실측, 랩어라운드) → 두 구간 합집합
                   "ranges": {"blue": ((95, 120, 80), (125, 255, 255)), "yellow": ((15, 60, 100), (40, 255, 255)),
-                             "red": ((160, 80, 60), (180, 255, 255))}}}
+                             "red": [((0, 60, 60), (12, 255, 255)), ((160, 60, 60), (180, 255, 255))]},
+                  "exclude": [(370, 205, 410, 250)]}}          # 검은 상자 위 파란 점(고정물, 베이스 아님) 제외
 HELD_BOX = (820, 0, 1280, 720)                  # 손목캠에서 든 벽이 보이는 영역(ref 생성 시)
 SCALE_TOL, RMS_TOL_PX = 0.03, 6.0
 MAX_STEP_MM, MAX_STEP_DEG = 3.0, 0.5
@@ -81,13 +84,19 @@ def grab(src="wrist"):
 
 def _blobs(img, color, amin, src="wrist"):
     rng = DET[src]["ranges"]
-    lo, hi = (rng[color if color != "red_s" else "red"] if rng else WALL_DOT_HSV[color])
+    r = (rng[color if color != "red_s" else "red"] if rng else WALL_DOT_HSV[color])
+    ranges = r if isinstance(r, list) else [r]
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    m = cv2.inRange(hsv, np.array(lo, np.uint8), np.array(hi, np.uint8))
+    m = None
+    for lo, hi in ranges:
+        mm = cv2.inRange(hsv, np.array(lo, np.uint8), np.array(hi, np.uint8))
+        m = mm if m is None else cv2.bitwise_or(m, mm)
     if src == "wrist":
         m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     n, lab, st, cen = cv2.connectedComponentsWithStats(m)
-    return [(float(cen[i][0]), float(cen[i][1]), int(st[i, 4])) for i in range(1, n) if st[i, 4] >= amin]
+    out = [(float(cen[i][0]), float(cen[i][1]), int(st[i, 4])) for i in range(1, n) if st[i, 4] >= amin]
+    ex = DET[src].get("exclude") or []
+    return [q for q in out if not any(x0 <= q[0] <= x1 and y0 <= q[1] <= y1 for x0, y0, x1, y1 in ex)]
 
 
 def wall_dots(img, color, ref=None, seeds=None, src="wrist"):
