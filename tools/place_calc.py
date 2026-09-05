@@ -373,9 +373,74 @@ USE_LEGACY_DELTA = False   # ★벽별 상수 보정(WALL_DELTA/RZ_BIAS)은 파�
 BASE_LAST = "/home/ar/bf2_console/base_pose_last.json"
 
 
+SEARCH_ROUNDS = 4          # 베이스 4점 탐색 최대 라운드
+SEARCH_CLIP_MM = 60.0      # 한 번에 옮기는 카메라 XY 상한
+LOOK_UP_MM = 80.0          # 아무것도 안 보이면 이만큼 올라가 넓게 본다(관측만, 측정은 z650 에서)
+
+
+def _cam_shift_to_center(px_center, Jinv, p0=(640.0, 360.0), scale=1.0):
+    """화면점 px_center 를 화면 중심 p0 로 가져오는 로봇 XY 이동량(px_to_robot 부호 규칙과 동일)."""
+    d = (Jinv * scale) @ np.array([p0[0] - px_center[0], p0[1] - px_center[1]], float)
+    n = float(np.hypot(*d))
+    if n > SEARCH_CLIP_MM:
+        d = d * (SEARCH_CLIP_MM / n)
+    return float(d[0]), float(d[1])
+
+
+def _all_color_blobs_center(img):
+    import pillar_dots as PD
+    d = PD.detect(img, None); pts = [p[:2] for lst in d.values() for p in lst if 30 < p[2] < 1500]
+    if len(pts) < 2:
+        return None, 0
+    return (float(np.mean([q[0] for q in pts])), float(np.mean([q[1] for q in pts]))), len(pts)
+
+
+def find_base_4pts(holding=False):
+    """★기둥 4점이 다 보일 때까지 찾는다(사용자 지시: 안 되면 멈추지 말고 찾는 방법을 마련).
+    라운드마다: 건강 게이트(노출 사다리 포함) → 4/4 면 끝. 아니면
+      · 3점 보임 → 그 중심을 화면 중심으로 오게 XY 이동(z650 유지)  · 그 미만 → z+80 올라가 색점 중심을 찾아 XY 이동 후 z650 복귀
+    측정은 항상 z650 에서 하고, 카메라가 OBS 에서 옮겨간 만큼(Δ)은 base pose 에 더한다(px_to_robot 유도: 진짜 = C + Jinv(p0−p') + Δ).
+    반환 (px4, Δxy). 끝까지 못 찾으면 예외."""
+    import slot_target as STG, hover_align as HA
+    Jinv, _mp = STG.load_map()
+    for r in range(SEARCH_ROUNDS):
+        cur = st()["tcp"]
+        if abs(cur[2] - OBS[2]) > 1.0:
+            speed(SPD_MOVE); move([cur[0], cur[1], OBS[2]] + list(OBS[3:]), tag="관측 높이 z650"); cur = st()["tcp"]
+        dxy = (cur[0] - OBS[0], cur[1] - OBS[1])
+        if health_gate():
+            px4, why = STG.pillars_px(mask_held=holding)
+            if px4 and len(px4) == 4:
+                if abs(dxy[0]) + abs(dxy[1]) > 0.5:
+                    print(f"  (탐색 결과 카메라 오프셋 Δ ({dxy[0]:+.1f},{dxy[1]:+.1f})mm 반영)")
+                return px4, dxy
+        px, why = STG.pillars_px(n=3, mask_held=holding)
+        if px and len(px) >= 3:
+            c = (float(np.mean([q[0] for q in px])), float(np.mean([q[1] for q in px])))
+            dx, dy = _cam_shift_to_center(c, Jinv)
+            print(f"  기둥 {len(px)}점만 보임(중심 px {c[0]:.0f},{c[1]:.0f}) → 카메라 ({dx:+.1f},{dy:+.1f}) 이동해 재탐색 [{r+1}/{SEARCH_ROUNDS}]")
+            speed(SPD_MOVE); move([cur[0] + dx, cur[1] + dy, cur[2]] + list(cur[3:]), tag="탐색 XY"); time.sleep(0.5)
+            continue
+        # 3점도 안 보임 → 올라가서 넓게 본다
+        speed(SPD_MOVE); move([cur[0], cur[1], OBS[2] + LOOK_UP_MM] + list(cur[3:]), tag=f"탐색 상승 z{OBS[2] + LOOK_UP_MM:.0f}"); time.sleep(0.6)
+        c, n = _all_color_blobs_center(HA.grab("wrist"))
+        if c is None:
+            print(f"  z{OBS[2] + LOOK_UP_MM:.0f} 에서도 색점 {n}개 — 베이스가 시야에 없음 [{r+1}/{SEARCH_ROUNDS}]")
+            move([cur[0], cur[1], OBS[2]] + list(cur[3:]), tag="z650 복귀")
+            continue
+        dx, dy = _cam_shift_to_center(c, Jinv, scale=(D_OBS_PILLAR + LOOK_UP_MM) / D_OBS_PILLAR)
+        print(f"  z{OBS[2] + LOOK_UP_MM:.0f} 색점 {n}개 중심 ({c[0]:.0f},{c[1]:.0f}) → 카메라 ({dx:+.1f},{dy:+.1f}) 이동 후 z650 재탐색 [{r+1}/{SEARCH_ROUNDS}]")
+        move([cur[0] + dx, cur[1] + dy, OBS[2] + LOOK_UP_MM] + list(cur[3:]), tag="탐색 XY(상공)")
+        move([cur[0] + dx, cur[1] + dy, OBS[2]] + list(cur[3:]), tag="z650 복귀"); time.sleep(0.5)
+    raise RuntimeError(f"베이스 기둥 4점을 {SEARCH_ROUNDS}라운드 탐색에도 못 찾음(노출 사다리·XY 재중심·상공 관측 포함) — 정지")
+
+
+D_OBS_PILLAR = 377.0
+
+
 def measure_base(holding=False):
-    """설계 3단계 앞부분: 관측자세(z650)에서 베이스 자세(로봇 좌표). 로봇이 관측자세가 아니면 간다(자유공간).
-    ★매 사이클 빈 손으로 호출한다(직전 벽 삽입이 베이스를 밀 수 있으니). 직전 측정과의 차이를 같이 보고."""
+    """설계 ①: 관측자세(z650)에서 베이스 자세(로봇 좌표). 4점이 안 보이면 find_base_4pts 가 카메라를 옮겨 찾는다.
+    ★매 사이클 빈 손으로 호출(직전 삽입이 베이스를 밀 수 있음). 직전 측정과의 차이를 함께 보고."""
     import slot_target as STG
     cur = st()["tcp"]
     if max(abs(cur[i] - OBS[i]) for i in range(3)) > 2.0:
@@ -384,13 +449,11 @@ def measure_base(holding=False):
         move(OBS, tag="관측자세")
         speed(1)
     Jinv, mp = STG.load_map()
-    if not health_gate():
-        raise RuntimeError("검출 건강 게이트 실패(기둥 4점 미달) — 이동 금지")
-    px4, why = STG.pillars_px(mask_held=holding)
-    if px4 is None:
-        raise RuntimeError("기둥 검출 실패: " + str(why))
+    px4, dxy = find_base_4pts(holding)
     a = json.load(open(STG.ANCH))
     pose, rms, _ = STG.base_pose_robot(px4, Jinv, tuple(a["C"]), tuple(a["p0"]))
+    if abs(dxy[0]) + abs(dxy[1]) > 0.01:
+        pose = HG.Pose2D(pose.x + dxy[0], pose.y + dxy[1], pose.yaw_deg)
     prev = json.load(open(BASE_LAST)) if os.path.exists(BASE_LAST) else None
     if prev:
         print(f"  베이스 이동(직전 측정 대비): Δx {pose.x - prev['x']:+.2f} Δy {pose.y - prev['y']:+.2f} Δyaw {HG.wrap_deg(pose.yaw_deg - prev['yaw']):+.3f}°  (직전 {prev['made']})")
@@ -431,9 +494,9 @@ def _grip_ok(gr, g_close, color):
 
 def run(color, seat=False, do_pick=True, target=None, align=True, len_gate=False, grasp_gate=True, grasp_teach=False):
     """★설계 4단계 고정 순서(9/5 밤, 사용자 설계):
-      ① 빈 손 베이스 재확인(관측자세)  — 매 사이클(직전 삽입이 베이스를 밀 수 있음)
-      ② 랙 재관측 → 벽 중앙 → 하강 파지 → 파지 판정  — 매 픽(픽마다 랙이 밀림)
-      ③ 20mm 상승 미끄러짐 확인 → 파지 편차 측정(게이트) → ①의 베이스로 목표 TCP → 운반 → 호버 z478 → 파지 재확인 → z+85
+      ① 빈 손 베이스 재확인(관측자세)  — 매 사이클. 4점 안 보이면 카메라를 옮겨 찾는다(find_base_4pts)
+      ② 랙 재관측 → 벽 중앙 → 하강 파지 → 파지 판정  — 매 픽. 양끝 안 보이면 카메라를 옮겨 찾는다(rack_find)
+      ③ 들어올림 → 파지 편차 측정(게이트) → ①의 베이스로 목표 TCP → 운반 → 호버 z478 → z+85  (파지 재판정은 닫을 때 1회만)
       ④ z+85 에서 두 카메라 호버 정렬(기둥 기준 상대) → 정렬된 TCP 로 막힘감시 하강 → 안착 시 기준 자동 승격
     target=(x,y,rz) 를 주면 ①③ 계산을 건너뛰고 그 목표로(디버그용). --no-pick 은 이미 든 상태(①은 든 채 마스크 측정)."""
     pick, hover, g_open, g_close = pick_pose(color)
@@ -461,11 +524,10 @@ def run(color, seat=False, do_pick=True, target=None, align=True, len_gate=False
             move([obs[0], obs[1], SAFE_Z, 180.0, 0.0, 180.0], tag="랙 위 SAFE")
             print("  그리퍼 열기 →", gripper(g_open))
             move(obs, tag="랙 중앙 관측자세")
-            tg = rack_grip_xy(color)                      # ★매번 새 프레임(4장)으로 벽 중앙·길이 게이트
+            tg = rack_find(color)                         # ★새 프레임으로 벽 중앙·길이 게이트, 양끝 안 보이면 카메라 옮겨 재탐색
             if tg is None:
-                raise RuntimeError("랙 관측에서 벽 중앙을 못 잡음(캘리브 없음/끝점 누락/길이 불일치) — 파지 중단")
-            gx, gy, rack_dang = tg
-            e = rack_ends(color, x_hint=json.load(open(RACK_CALIB))[color]["Pc0"][0])
+                raise RuntimeError("랙 관측에서 벽 양끝을 끝내 못 잡음(3라운드 탐색 후) — 파지 중단")
+            gx, gy, rack_dang, e = tg
             print(f"  랙: 벽 중앙 ({e['mid'][0]:.0f},{e['mid'][1]:.0f}) 길이 {e['len_px']:.0f}px 각 {e['ang']:+.2f}° → 파지 XY ({gx:.1f},{gy:.1f}) 각차 {rack_dang:+.2f}°")
             rack_len_check(color, e, strict=len_gate)     # 뎁스 물리 길이 검산(색점과 독립, 보고만 — 검은 랙에서 뎁스 불안정)
             rot = [180.0, 0.0, 180.0]                     # ★랙 하강은 항상 rz 180(9/5: −177 잔류 → 3° 물림·동결)
@@ -479,11 +541,8 @@ def run(color, seat=False, do_pick=True, target=None, align=True, len_gate=False
             print("  파지 판정 OK:", why)
             # ---------- ③ 미끄러짐 확인 → 파지 편차 → 목표
             print("③ 파지 검증 → 목표 계산")
-            speed(SPD_DESC); move([gx, gy, pick[2] + 20] + rot, tag="+20 미끄러짐 확인")
-            time.sleep(0.4); ok, why = _grip_ok(grip_read(), g_close, color)
-            if not ok:
-                raise RuntimeError("20mm 상승 후 파지 이탈(" + why + ") — 정지")
-            move([gx, gy, hover[2]] + rot, tag="들어올림")
+            speed(SPD_DESC); move([gx, gy, hover[2]] + rot, tag="들어올림")
+            print(f"  (참고) 들어올린 뒤 그리퍼 {grip_read()}")           # 재판정 없음(사용자: 실제 이탈 사례 0)
             hd, _w = held_wall_depth(color)                 # 참고 출력만(뎁스 불신)
             if hd: print(f"  (참고) 든 벽 뎁스 {hd['d_w']:.0f}mm · 축 {hd['ang_img']:+.2f}° · 폭 {hd['span_px']:.0f}px")
             if grasp_teach:
@@ -508,10 +567,7 @@ def run(color, seat=False, do_pick=True, target=None, align=True, len_gate=False
         speed(SPD_MOVE); cur = st()["tcp"]
         move([cur[0], cur[1], SAFE_Z] + list(cur[3:]), tag="상승 SAFE")
         move([P["x"], P["y"], SAFE_Z] + tgt_rot, tag="목표 위 SAFE(rz 정렬)")
-        ok, why = _grip_ok(grip_read(), g_close, color)     # ★운반 후 파지 재확인(9/5 이탈 사고)
-        if not ok:
-            raise RuntimeError("운반 후 파지 이탈 의심(" + why + ") — 정지")
-        print("  운반 후 파지 재확인 OK:", why)
+        print(f"  (참고) 운반 후 그리퍼 {grip_read()}")                 # 재판정 없음(사용자 지시)
         speed(SPD_DESC); move([P["x"], P["y"], HOVER_Z] + tgt_rot, tag="목표 호버 z478")
         if not seat:
             print("호버 정지. --seat 를 주면 z+85 에서 호버 정렬 후 하강."); return
@@ -775,15 +831,18 @@ def rack_grip_calib(color):
     print(f"✅ [{color}] 랙 캘리브: 관측중앙 ({e['mid'][0]:.1f},{e['mid'][1]:.1f}) ↔ 파지XY ({pick[0]:.1f},{pick[1]:.1f}) 각 {e['ang']:+.2f}°")
 
 
-def rack_grip_xy(color):
-    """관측 중앙자세에서 현재 벽 중앙 → 파지 XY 계산(캘리브 기반). 반환 (Tgx, Tgy, dang) 또는 None."""
+def rack_grip_xy(color, dxy=(0.0, 0.0)):
+    """관측 중앙자세에서 현재 벽 중앙 → 파지 XY(캘리브 기반). dxy = 카메라가 관측자세에서 옮겨간 로봇 XY(탐색 후).
+    유도: Pc' = Pc + J·Δ → Tg = Tg0 − Jinv(Pc'−Pc0) + Δ. x_hint 도 J·Δ 만큼 옮겨서 같은 벽을 고른다. 반환 (Tgx, Tgy, dang) 또는 None."""
     import numpy as np
     if not os.path.exists(RACK_CALIB):
         return None
     cal = json.load(open(RACK_CALIB)).get(color)
     if not cal:
         return None
-    e = rack_ends(color, x_hint=cal["Pc0"][0])           # ★같은 색 여러 벽이면 캘리브 x 로 그 벽 선택
+    J = np.linalg.inv(np.array(cal["Jinv"]))
+    hint_shift = J @ np.array(dxy, float)
+    e = rack_ends(color, x_hint=cal["Pc0"][0] + float(hint_shift[0]))   # ★같은 색 여러 벽이면 캘리브 x 로 그 벽 선택
     if not e:
         return None
     # ★길이 게이트(9/5 실증): 벽 끝점을 하나 놓치면 길이가 짧게 나오고 '중앙'이 치우쳐 엉뚱한 곳을 문다
@@ -795,8 +854,58 @@ def rack_grip_xy(color):
         return None
     Jinv = np.array(cal["Jinv"]); dpx = np.array([e["mid"][0] - cal["Pc0"][0], e["mid"][1] - cal["Pc0"][1]])
     dmm = Jinv @ dpx                                  # 벽이 화면에서 dpx 옮겨짐 = 세계에서 −dmm → 파지 XY 도 그만큼
-    Tg = (cal["Tg0"][0] - dmm[0], cal["Tg0"][1] - dmm[1])
+    Tg = (cal["Tg0"][0] - dmm[0] + dxy[0], cal["Tg0"][1] - dmm[1] + dxy[1])
     return Tg[0], Tg[1], HG.wrap_deg(e["ang"] - cal["ang0"])
+
+
+def _rack_color_center(color, x_hint, radius=220.0):
+    """탐색용: 그 색 점 중 x_hint 근처(±radius) 것들의 중심 px. (양끝이 안 보여도 보이는 점으로 방향을 잡는다)"""
+    import cv2
+    lo, hi = WALL_DOT_HSV[color]
+    b = UR.urlopen("http://127.0.0.1:8766/raw", timeout=5).read()
+    img = cv2.imdecode(np.frombuffer(b, np.uint8), cv2.IMREAD_COLOR); hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    m = cv2.inRange(hsv, np.array(lo, np.uint8), np.array(hi, np.uint8)); m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    n, lab, stt, cen = cv2.connectedComponentsWithStats(m)
+    pts = [(float(cen[i][0]), float(cen[i][1])) for i in range(1, n) if 40 < stt[i, 4] < 3000 and abs(cen[i][0] - x_hint) <= radius]
+    if not pts:
+        return None, 0
+    return (float(np.mean([q[0] for q in pts])), float(np.mean([q[1] for q in pts]))), len(pts)
+
+
+def rack_find(color, max_round=3):
+    """★랙 양끝이 안 보이면 카메라를 옮겨 다시 본다(사용자 지시). 라운드마다 rack_grip_xy 시도 → 실패 시
+    보이는 점들의 중심을 화면 중심으로(같은 높이 XY 이동, ≤50mm) → 재시도. 점이 하나도 없으면 z+60 상공에서 찾아 이동.
+    반환 (Tgx, Tgy, dang, e) 또는 None. Tg 에는 카메라 오프셋이 이미 반영돼 있다."""
+    import numpy as np
+    obs = json.load(open(RACK_OBS))["tcp"]
+    cal = json.load(open(RACK_CALIB)).get(color) if os.path.exists(RACK_CALIB) else None
+    if not cal:
+        print(f"  ⚠ {color} 랙 캘리브 없음"); return None
+    Jinv = np.array(cal["Jinv"]); J = np.linalg.inv(Jinv)
+    for r in range(max_round):
+        cur = st()["tcp"]; dxy = (cur[0] - obs[0], cur[1] - obs[1])
+        tg = rack_grip_xy(color, dxy)
+        if tg is not None:
+            e = rack_ends(color, x_hint=cal["Pc0"][0] + float((J @ np.array(dxy))[0]))
+            if abs(dxy[0]) + abs(dxy[1]) > 0.5:
+                print(f"  (랙 탐색 카메라 오프셋 Δ ({dxy[0]:+.1f},{dxy[1]:+.1f})mm 반영)")
+            return tg[0], tg[1], tg[2], e
+        x_hint = cal["Pc0"][0] + float((J @ np.array(dxy))[0])
+        c, n = _rack_color_center(color, x_hint)
+        if c is None:
+            speed(SPD_MOVE); move([cur[0], cur[1], cur[2] + 60] + list(cur[3:]), tag="랙 탐색 상승 +60"); time.sleep(0.5)
+            c, n = _rack_color_center(color, x_hint, radius=400)
+            if c is None:
+                print(f"  랙 상공에서도 {color} 점 없음 [{r+1}/{max_round}]"); move(cur, tag="랙 관측 높이 복귀"); continue
+            d = Jinv @ np.array([640.0 - c[0], 360.0 - c[1]]) * ((cur[2] + 60 - 340) / (cur[2] - 340))   # 대략 축척(랙 벽 윗면 z≈340)
+        else:
+            d = Jinv @ np.array([640.0 - c[0], 360.0 - c[1]])
+        nrm = float(np.hypot(*d))
+        if nrm > 50.0:
+            d = d * (50.0 / nrm)
+        print(f"  랙 {color} 점 {n}개(중심 px {c[0]:.0f},{c[1]:.0f}) → 양끝 못 봄 → 카메라 ({d[0]:+.1f},{d[1]:+.1f}) 이동 재관측 [{r+1}/{max_round}]")
+        speed(SPD_MOVE); move([cur[0] + float(d[0]), cur[1] + float(d[1]), obs[2]] + list(obs[3:]), tag="랙 탐색 XY"); time.sleep(0.5)
+    return None
 
 
 def rack_center_align(color, tol_px=1.5, max_iter=4):
