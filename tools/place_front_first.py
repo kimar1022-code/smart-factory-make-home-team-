@@ -417,10 +417,10 @@ def main():
     try:
         if "--no-approach" not in sys.argv:
             cur = stable()
-            GP.speed(1)
+            # ★9/5 사용자 지시: 이동(벽 들어올리기+운반)은 빠르게. 자유공간이고 측정을 안 하는 구간.
+            GP.speed(GP.MOVE_SPEED)
             if cur[2] < GP.SLOW_Z:
-                GP.move_z(GP.SLOW_Z)
-            GP.speed(2)
+                GP.move_z(GP.SLOW_Z)     # 벽 들어 올리기
             GP.move_z(GP.SAFE_Z)
             tgt = [it_tcp[0], it_tcp[1], GP.SAFE_Z] + list(it_tcp[3:])
             post("move_tcp", {"tcp": tgt, "dry_run": False}); time.sleep(0.9)
@@ -429,7 +429,7 @@ def main():
                 time.sleep(0.35)
             if not _verify_reach(tgt, 2.0, timeout=15):
                 raise RuntimeError("운반 미도달 — 정지")
-        GP.speed(1)
+        GP.speed(1)                      # ← 여기부터 정렬: 1% 고정
         move_z(rows[0]["z"]); time.sleep(0.6)
         e = cam1_bright("z478")                                    # ★어두우면(저녁) 그 자리에서 재정규화 — 노랑 점 임계 이탈 방지(9/2 실증: 밝기 52 → H18/V96 깜빡임)
         if e and e.get("bright") is not None and e["bright"] < 80:

@@ -1,0 +1,44 @@
+{
+ "made": "2026-09-05 20:12",
+ "score": 0.07,
+ "apply": {
+  "set": 417
+ },
+ "settings": {
+  "exposure": 333.0,
+  "bright": 142.24595052083333,
+  "wb": 4600.0,
+  "awb": 0.0
+ },
+ "detail": {
+  "frames": 2,
+  "4점검출": 0,
+  "scores": [
+   0.0,
+   0.0
+  ],
+  "detail": {
+   "worst_margin": 0.07,
+   "margins": [
+    0.215,
+    0.162,
+    0.07,
+    0.183
+   ],
+   "ghosts": 3,
+   "areas": [
+    84,
+    110,
+    49,
+    102
+   ],
+   "colors": [
+    "yellow",
+    "red",
+    "blue",
+    "blue"
+   ]
+  }
+ },
+ "note": "health_gate 적응 노출"
+}
