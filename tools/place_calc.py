@@ -16,6 +16,7 @@
 """
 import sys, json, time, math, os
 import urllib.request as UR
+import numpy as np
 
 sys.path.insert(0, "/home/ar/bf2_console/tools")
 import house_geometry as HG
@@ -126,11 +127,9 @@ def grasp_measure(color="blue", rack_dang=None):
     n_ref = len(ref.get("cam1_wall_pd") or [])
     if len(pts) < 1:
         return None, "든 벽 점 0개"
-    scale = ref.get("wall_scale_mm_per_px")
+    scale = ref.get("wall_scale_mm_per_px") or wall_scale()
     if not scale:
-        m, _w = held_wall_depth(color)
-        scale = m["mm_px"] if m else 0.12          # ★뎁스 실측 축척 우선, 없으면 옛 가상값(경고)
-        print(f"  파지 축척: 뎁스 {m['d_w']:.0f}mm → {scale:.4f}mm/px" if m else "  ⚠ 파지 축척: 뎁스 실측 불가 → 가상값 0.12mm/px")
+        scale = 0.12; print("  ⚠ 파지 축척: 캘리브 없음 → 가상값 0.12mm/px (`--grasp-teach` 파랑 1회로 확정)")
     if len(pts) >= 2 and n_ref >= 2:
         (x1, y1, _), (x2, y2, _) = pts[0], pts[-1]
         ang = math.degrees(math.atan2(x2 - x1, y2 - y1)); mid = ((x1 + x2) / 2, (y1 + y2) / 2)
@@ -147,6 +146,52 @@ def grasp_measure(color="blue", rack_dang=None):
 
 
 GRASP_GATE_MM, GRASP_GATE_DEG = 1.0, 0.3     # 설계 2단계 게이트(9/4 v2.1). 넘으면 정지·보고, 자동 재파지 금지
+WALL_SCALE_FILE = "/home/ar/bf2_console/wall_scale.json"   # 든 벽 평면 축척(mm/px) — 카메라·그리퍼 기하 상수라 벽 무관 1개
+
+
+def wall_scale():
+    """든 벽 평면 축척. ★뎁스를 쓰지 않는다(검은 랙·검은 벽에서 D435 뎁스 불안정 — 사용자 지적).
+    파랑(점 2개)을 든 채 점 간격 px ↔ 랙 관측에서 잰 같은 점 간격 mm 로 1회 캘리브(`run blue --grasp-teach` 가 자동 저장)."""
+    if os.path.exists(WALL_SCALE_FILE):
+        return json.load(open(WALL_SCALE_FILE)).get("mm_per_px")
+    return None
+
+
+def save_grasp_sig_now(color, grip_cmd, gr, gap_mm=None):
+    """★든 상태에서 지금 손목캠 벽 점을 공칭 파지 서명으로 저장(그리퍼 조작 없음). gap_mm 주면 축척도 캘리브."""
+    import cv2, numpy as np
+    lo, hi = WALL_DOT_HSV[color]
+    b = UR.urlopen("http://127.0.0.1:8766/raw", timeout=5).read()
+    img = cv2.imdecode(np.frombuffer(b, np.uint8), cv2.IMREAD_COLOR); hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    m = cv2.inRange(hsv, np.array(lo, np.uint8), np.array(hi, np.uint8)); m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    n, lab, stt, cen = cv2.connectedComponentsWithStats(m); g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY); pts = []
+    for i in range(1, n):
+        a = int(stt[i, 4]); x, y = cen[i]
+        if not (500 <= a <= 6000) or x < 600 or x > 1260 or y < 20 or y > 700:
+            continue
+        ys, xs = np.nonzero(lab == i); w = g[ys, xs].astype(float) + 1
+        pts.append((float((xs * w).sum() / w.sum()), float((ys * w).sum() / w.sum()), a))
+    pts.sort(key=lambda q: q[1])
+    if not pts:
+        print("  ⚠ 서명 저장 실패: 벽 점 0개"); return None
+    if len(pts) >= 2:
+        (x1, y1, _), (x2, y2, _) = pts[0], pts[-1]
+        ang = math.degrees(math.atan2(x2 - x1, y2 - y1)); L = math.hypot(x2 - x1, y2 - y1); mid = [(x1 + x2) / 2, (y1 + y2) / 2]
+    else:
+        ang, L, mid = 0.0, 0.0, [pts[0][0], pts[0][1]]
+    ref = json.load(open(GRASP_REF)) if os.path.exists(GRASP_REF) else {}
+    ref.setdefault("by_color", {})[color] = {"made": time.strftime("%Y-%m-%d %H:%M"), "grip_cmd": grip_cmd, "grip_real": gr, "tcp": st()["tcp"],
+        "cam1_wall_pd": [[q[0], q[1], q[2]] for q in pts], "cam1_wall_ang_deg": ang, "cam1_wall_gap_px": L, "cam1_wall_mid": mid,
+        "cam1_wall_detect": {"hsv_lo": list(lo), "hsv_hi": list(hi), "area": [500, 6000], "x_min": 600},
+        "note": "랙 중앙 파지(rack_calib) 상태에서 --grasp-teach 로 저장"}
+    json.dump(ref, open(GRASP_REF, "w"), ensure_ascii=False, indent=1)
+    print(f"  ✅ [{color}] 파지 서명 저장({len(pts)}점): 각 {ang:+.2f}° 간격 {L:.0f}px 중점 ({mid[0]:.0f},{mid[1]:.0f})")
+    if gap_mm and L > 50:
+        sc = gap_mm / L
+        json.dump({"mm_per_px": sc, "made": time.strftime("%Y-%m-%d %H:%M"), "color": color, "gap_mm": gap_mm, "gap_px": L,
+                   "note": "랙 관측 인접 점 간격(mm) ÷ 든 벽 점 간격(px). 뎁스 미사용"}, open(WALL_SCALE_FILE, "w"), indent=1)
+        print(f"  ✅ 든 벽 축척 캘리브: {gap_mm:.1f}mm / {L:.0f}px = {sc:.4f}mm/px (뎁스 미사용)")
+    return pts
 
 
 # ★뎁스 기반 벽 계측(9/5 밤, 사용자 설계 "잡으면 뎁스로 벽 길이를 재서 검산"). ⚠ 실기 미검증(로봇 꺼진 뒤 작성).
@@ -181,6 +226,8 @@ def held_wall_depth(color, nx=68, ny=72):
     if len(pts) < 30:
         return None, f"든 벽 뎁스 점 {len(pts)}개(<30) — 벽을 안 들었거나 뎁스 무효"
     d_w = float(np.median(pts[:, 2]))
+    if not (80.0 <= d_w <= 300.0):
+        return None, f"든 벽 뎁스 {d_w:.0f}mm 비현실(검은 벽 뎁스 불량 의심)"
     near = pts[np.abs(pts[:, 2] - d_w) < 12.0]
     c = near[:, :2].mean(0); X = near[:, :2] - c
     w, v = np.linalg.eigh(X.T @ X); ax = v[:, int(np.argmax(w))]
@@ -385,7 +432,7 @@ def _grip_ok(gr, g_close, color):
     return False, f"그리퍼 {gr}, 닫힘 {g_close}, 벽 점 0"
 
 
-def run(color, seat=False, do_pick=True, target=None, align=True, len_gate=False, grasp_gate=True):
+def run(color, seat=False, do_pick=True, target=None, align=True, len_gate=False, grasp_gate=True, grasp_teach=False):
     """★설계 4단계 고정 순서(9/5 밤, 사용자 설계):
       ① 빈 손 베이스 재확인(관측자세)  — 매 사이클(직전 삽입이 베이스를 밀 수 있음)
       ② 랙 재관측 → 벽 중앙 → 하강 파지 → 파지 판정  — 매 픽(픽마다 랙이 밀림)
@@ -423,7 +470,9 @@ def run(color, seat=False, do_pick=True, target=None, align=True, len_gate=False
             gx, gy, rack_dang = tg
             e = rack_ends(color, x_hint=json.load(open(RACK_CALIB))[color]["Pc0"][0])
             print(f"  랙: 벽 중앙 ({e['mid'][0]:.0f},{e['mid'][1]:.0f}) 길이 {e['len_px']:.0f}px 각 {e['ang']:+.2f}° → 파지 XY ({gx:.1f},{gy:.1f}) 각차 {rack_dang:+.2f}°")
-            rack_len_check(color, e, strict=len_gate)     # 뎁스 물리 길이 검산(색점과 독립)
+            rack_len_check(color, e, strict=len_gate)     # 뎁스 물리 길이 검산(색점과 독립, 보고만 — 검은 랙에서 뎁스 불안정)
+            rack_scale = float(np.hypot(*np.array(json.load(open(RACK_MAP))["Jinv_mm_per_px"])[:, 0]))
+            gap_mm = e["len_px"] * rack_scale / max(1, e["n_dots"] - 1) if e.get("n_dots", 0) >= 2 else None   # 인접 점 간격(균등 가정)
             rot = [180.0, 0.0, 180.0]                     # ★랙 하강은 항상 rz 180(9/5: −177 잔류 → 3° 물림·동결)
             speed(SPD_MOVE); move([gx, gy, obs[2]] + rot, tag="파지 XY 위(관측 높이)")
             speed(SPD_DESC); move([gx, gy, pick[2] + 40] + rot, tag="픽 −40")
@@ -440,8 +489,12 @@ def run(color, seat=False, do_pick=True, target=None, align=True, len_gate=False
             if not ok:
                 raise RuntimeError("20mm 상승 후 파지 이탈(" + why + ") — 정지")
             move([gx, gy, hover[2]] + rot, tag="들어올림")
-            hd, _w = held_wall_depth(color)
-            if hd: print(f"  든 벽 뎁스 {hd['d_w']:.0f}mm · 축 {hd['ang_img']:+.2f}° · 폭 {hd['span_px']:.0f}px")
+            hd, _w = held_wall_depth(color)                 # 참고 출력만(뎁스 불신)
+            if hd: print(f"  (참고) 든 벽 뎁스 {hd['d_w']:.0f}mm · 축 {hd['ang_img']:+.2f}° · 폭 {hd['span_px']:.0f}px")
+            if grasp_teach:
+                # ★서명 티칭: 랙 중앙 파지가 곧 공칭 파지. 지금 든 점을 서명으로 저장(+파랑이면 축척 캘리브), 게이트 생략
+                save_grasp_sig_now(color, g_close, grip_read(), gap_mm=gap_mm if len(held_wall_dots(color)) >= 2 else None)
+                grasp_gate = False
             g, info = grasp_measure(color, rack_dang=rack_dang)
             if g is None:
                 if grasp_gate:
@@ -877,7 +930,8 @@ if __name__ == "__main__":
         if "--target" in sys.argv:
             i = sys.argv.index("--target"); tgt = (float(sys.argv[i + 1]), float(sys.argv[i + 2]), float(sys.argv[i + 3]))
         run(color, seat="--seat" in sys.argv, do_pick="--no-pick" not in sys.argv, target=tgt,
-            align="--no-align" not in sys.argv, len_gate="--len-gate" in sys.argv, grasp_gate="--no-grasp-gate" not in sys.argv)
+            align="--no-align" not in sys.argv, len_gate="--len-gate" in sys.argv, grasp_gate="--no-grasp-gate" not in sys.argv,
+            grasp_teach="--grasp-teach" in sys.argv)
     elif mode == "held_depth":          # 벽 든 채(어느 높이든): 뎁스·축척·축 각
         m, why = held_wall_depth(color)
         print("❌ " + why if m is None else f"[{color}] 든 벽 뎁스 {m['d_w']:.0f}mm · {m['mm_px']:.4f}mm/px · 축 {m['ang_img']:+.2f}° · 폭 {m['span_px']:.0f}px · 중심 ({m['center_px'][0]:.0f},{m['center_px'][1]:.0f}) · 점 {m['n']}")
