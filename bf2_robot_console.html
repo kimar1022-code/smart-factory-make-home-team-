@@ -247,7 +247,7 @@ textarea{width:100%;min-height:220px;font:18px var(--mono);border:1px solid #3A4
     <div id="twinlabel">DIGITAL TWIN · drag=move · right-drag/wheel=rotate · empty=camera</div>
     <div style="position:absolute;top:8px;right:10px;z-index:5;display:flex;gap:8px">
       <button id="tg-joint" title="켜면 로봇 링크를 잡아끌어 관절을 움직입니다(고스트 미리보기 → 놓으면 실제 이동). 배치 이동은 꺼짐">🖐 관절 드래그</button>
-      <button id="tg-zk1"></button><button id="tg-zk2"></button><button id="tg-conv"></button><button id="tg-cam"></button><button id="tg-scam"></button><button id="tg-ncam"></button></div>
+      <button id="tg-zk1"></button><button id="tg-zk2"></button><button id="tg-conv"></button><button id="tg-cam"></button><button id="tg-scam"></button><button id="tg-rvw"></button><button id="tg-ncam"></button></div>
     <div id="twinstate"></div>
     <div id="camwrap" class="campanel" title="손목캠(D435 :8766) — 클릭=그 점 추적 고정 · 더블클릭=해제">
       <div class="chdr"><span id="camhdr-t">손목캠 </span><span><button class="c-pop" title="별창으로">⧉</button><button class="c-x" title="빼기">✕</button></span></div>
@@ -256,6 +256,10 @@ textarea{width:100%;min-height:220px;font:18px var(--mono);border:1px solid #3A4
     <div id="scamwrap" class="campanel" title="측면 카메라(C270 :8771)">
       <div class="chdr"><span id="scamhdr-t">측면캠 </span><span><button class="c-pop" title="별창으로">⧉</button><button class="c-x" title="빼기">✕</button></span></div>
       <img id="scam" alt="side cam"><div class="cgrip" title="드래그해서 크기 조절"></div>
+    </div>
+    <div id="rvwrap" class="campanel" title="랙 관측 뷰(:8774) — 벽 양끝점·중앙점">
+      <div class="chdr"><span id="rvwhdr-t">랙관측 </span><span><button class="c-pop" title="별창으로">⧉</button><button class="c-x" title="빼기">✕</button></span></div>
+      <img id="rvw" alt="rack view"><div class="cgrip" title="드래그해서 크기 조절"></div>
     </div>
     <div id="ncamwrap" class="campanel" title="새 카메라(USB /dev/video0 → :8768) — ⟳ = 90° 회전">
       <div class="chdr"><span id="ncamhdr-t">새카메라 </span><span><button class="c-rot" title="90° 회전">⟳</button><button class="c-pop" title="별창으로">⧉</button><button class="c-x" title="빼기">✕</button></span></div>
@@ -1253,10 +1257,14 @@ function camPanel(id,btnId,label,streamUrl,def){
   im.addEventListener('load',apply,{once:true});apply();
   return {connect,W,im,st};
 }
-(()=>{const H=location.hostname||'localhost';const CAM=`http://${H}:8766`,SCAM=`http://${H}:8771`;
+(()=>{const H=location.hostname||'localhost';const CAM=`http://${H}:8766`,SCAM=`http://${H}:8771`,PCAM=`http://${H}:8773`,RVIEW=`http://${H}:8774`;/* ★9/5: 손목캠 패널은 '기둥 검출 뷰'(:8773)를 띄운다. cam_server 오버레이는 벽 스티커용 임계값이라
+   기둥 색점(노랑 S120·파랑 S246)을 놓치고 밑판 높이의 유령 파랑을 그렸다(사용자 확인).
+   8773 은 같은 카메라 영상 위에 기둥 검출·정답위치·걸러낸 유령을 그린다. 해상도가 같아
+   클릭 추적 좌표는 그대로 8766 으로 보내면 된다. */
  const R=$('twinwrap').getBoundingClientRect();
- const wc=camPanel('camwrap','tg-cam','손목캠',CAM+'/stream',{x:Math.max(0,R.width-430),y:Math.max(0,R.height-260),w:420,on:true});
+ const wc=camPanel('camwrap','tg-cam','손목캠·기둥검출',PCAM+'/stream',{x:Math.max(0,R.width-430),y:Math.max(0,R.height-260),w:420,on:true});
  const sc=camPanel('scamwrap','tg-scam','측면캠',SCAM+'/stream',{x:10,y:Math.max(0,R.height-260),w:380,on:true});
+ const rv=camPanel('rvwrap','tg-rvw','랙관측',RVIEW+'/stream',{x:8,y:Math.max(0,R.height-520),w:420,on:false});
  /* 9/1 새 USB 카메라(뎁스 반대편, :8768) */
  const NCAM=`http://${H}:8768`;
  /* 옛 세션의 '닫힘' 상태가 남아 패널이 안 보이는 사고 방지 — 최초 1회만 초기화 */
@@ -1275,7 +1283,7 @@ function camPanel(id,btnId,label,streamUrl,def){
  let camBoot=null,camFail=0;
  setInterval(async()=>{if(!wc.st.on)return;try{const j=await(await fetch(CAM+'/dots',{cache:'no-store'})).json();camFail=0;
    if(camBoot!==null&&j.boot!==camBoot){wc.connect();log('sys','cam','손목캠 서버 재시작 감지 → 재접속')}
-   camBoot=j.boot;const srcTag=(j.source&&j.source!=='rs')?('['+j.source.toUpperCase()+'] '):'';$('camhdr-t').textContent=srcTag+(j.focus?('손목캠 · FOCUS '+j.focus.join('+')+' '):'손목캠 ')}
+   camBoot=j.boot;const srcTag=(j.source&&j.source!=='rs')?('['+j.source.toUpperCase()+'] '):'';$('camhdr-t').textContent=srcTag+(j.focus?('손목캠 · FOCUS '+j.focus.join('+')+' '):'손목캠·기둥검출 ')}
   catch(e){if(++camFail===3){wc.connect()}}},3000);
  /* 측면캠(8771)은 단순 MJPEG — camPanel 의 img.onerror 재접속으로 충분(별도 워치독 불필요) */
  im.onclick=e=>{const r=im.getBoundingClientRect();const x=(e.clientX-r.left)*1280/r.width,y=(e.clientY-r.top)*720/r.height;
@@ -1306,7 +1314,7 @@ async function startupCheck(){
     items.push({k:'팀 서버(/cell/status)', ok:!!(j.server&&j.server.alive), v:(j.server&&j.server.alive)?'하트비트 수신':'미수신 — 서버팀 미기동/도메인 불일치(데모엔 무관)', warn:true});
   }
   // 2) 카메라
-  for(const [nm,port] of [['손목캠',8766],['새카메라',8768],['측면캠',8771]]){
+  for(const [nm,port] of [['손목캠',8766],['기둥검출',8773],['랙관측',8774],['새카메라',8768],['측면캠',8771]]){
     let h=null;try{h=await(await fetch(`http://${H}:${port}/health`,{cache:'no-store'})).json()}catch(e){}
     // 카메라 정상 판정: cam_server 는 ok 필드, 측면캠은 ok, age<3s 면 수신중
     const camOk=!!(h&&(h.ok===true||(h.age!=null&&h.age<3)));

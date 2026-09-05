@@ -37,6 +37,8 @@ from golden import (BRIDGE, CAL, M1, M2, dots, match, move_j6, move_xy, move_xy_
                     move_z, post, snap_all, solve_xy, st, stable, wrap, _verify_reach)
 
 SAFE_Z, SLOW_Z = 650.0, 425.0
+MOVE_SPEED = 30            # ★이동(운반·들어올리기) 속도% — 9/5 사용자 지시로 2%→30%(브리지 상한 30).
+                           #   정렬·하강 감시 속도는 건드리지 않는다(1~3%, 실증값).
 # ★place 는 삽입 성공(9/1)이 검증된 설정을 유지한다 — 사용자 지시로 1mm 통일에서 제외.
 #   조립대 자세에서는 0.45mm 스텝이 실제로 실행되며, 이 값으로 0.25~0.29mm 정렬 후 삽입 성공.
 GAIN, CAP_MM = 0.6, 0.6
@@ -576,10 +578,13 @@ def main():
 
     if "--no-approach" not in sys.argv:
         cur = stable()
-        speed(1)
+        # ★9/5 사용자 지시("산업용이면 이렇게 느리면 안 된다 — 이동은 빠르게, 정렬은 어쩔 수 없고"):
+        #   이 블록은 전부 '이동'이다 — 랙에서 벽을 들어 올려 조립대 위 SAFE_Z 로 운반하는 구간.
+        #   측정도 정렬도 하지 않고, 기둥 꼭대기(133mm)보다 한참 위 자유공간이라 속도를 올려도
+        #   품질에 닿지 않는다. 정렬(1%)은 아래 speed(1) 부터 그대로다.
+        speed(MOVE_SPEED)
         if cur[2] < SLOW_Z:
-            move_z(SLOW_Z)
-        speed(2)
+            move_z(SLOW_Z)               # 벽 들어 올리기 — 사용자 승인으로 이 속도 사용
         move_z(SAFE_Z)
         tgt = [it_tcp[0], it_tcp[1], SAFE_Z] + list(it_tcp[3:])
         post("move_tcp", {"tcp": tgt, "dry_run": False})
@@ -590,8 +595,8 @@ def main():
         if not _verify_reach(tgt, 2.0, timeout=15):
             sys.exit(f"운반 미도달: 목표 {[round(v,1) for v in tgt[:3]]} "
                      f"현재 {[round(v,1) for v in stable()[:3]]} — 정지")
-        move_z(rows[0]["z"])
-    speed(1)
+        move_z(rows[0]["z"])             # 첫 정렬단 높이까지 하강도 이동 구간(측정 전)
+    speed(1)                             # ← 여기부터 정렬: 1% 고정(9/1 밤 5% 진동 실패로 철회된 값)
 
     # 1) 파지 검증 (★최상단 높이로 올라가서 — 벽선 각 측정은 z 에 따라 바이어스가 있어
     #    기준 높이에서 재야 한다. 9/1: 같은 파지가 z478 에서 +0.32°, z388 에서 +0.74°)

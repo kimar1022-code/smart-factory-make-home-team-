@@ -789,6 +789,14 @@ def cam_loop(src):
                 latest["jpg"] = jpg.tobytes(); latest["info"] = "no signal"; latest["dots"] = []
             continue
         img = _fit(img)
+        # ★★9/5 진범: 지금까지 오버레이를 **소스가 돌려준 버퍼에 직접** 그려 왔다.
+        #   RealSense 는 프레임 버퍼를 재활용하므로, 그 버퍼가 다시 돌아올 때 지난 프레임의
+        #   원·십자·글씨가 남아 있다. 그 결과 ①/raw 가 30회 중 7회 주석 섞인 프레임을 내주고
+        #   ②검출 입력 raw 에도 지난 그림이 섞여 **검출기가 자기가 그린 점을 다시 검출**한다
+        #   (오래 시달린 '유령점'의 유력한 원인. 8/28 에 raw=img.copy() 로 고친 줄 알았지만
+        #    복사 시점이 아니라 '어디에 그리느냐'가 문제였다).
+        #   → 화면용으로 한 장 복사해 두고, 그리기는 전부 그 복사본에만 한다.
+        img = img.copy()
         SRC["last_ts"] = time.time(); SRC["frames"] += 1
         n_frame += 1
         # 9/1: 검출(ArUco+도트+뎁스중앙값)이 매 프레임 돌아 CPU 182% → 8Hz 로 분리.

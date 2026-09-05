@@ -9,6 +9,8 @@ LOG(){ echo "$(date '+%m-%d %H:%M:%S') $*"; }
 NEWCAM_BYID="/dev/v4l/by-id/usb-Generic_USB_Camera_200901010001-video-index0"
 LOG "cam_autostart 시작 — D435(8766)+새카메라(8768) 감시(3s)"
 D435_UP=0
+d_frozen=0
+d_prev_hash=""
 frozen_count=0
 prev_hash=""
 
@@ -32,10 +34,31 @@ while true; do
     for i in $(seq 1 20); do ss -tlnp 2>/dev/null | grep -q ':8766 ' && break; sleep 1; done
     if ss -tlnp 2>/dev/null | grep -q ':8766 '; then
       sleep 2; curl -s -m25 "http://127.0.0.1:8766/expo?bright=100" >/dev/null 2>&1
-      LOG "8766 기동 완료·밝기 정규화"; D435_UP=1
+      # ★9/5: 색점 검출용으로 보정해 둔 노출을 되돌린다(재기동하면 기본값으로 돌아가
+      #   노랑·파랑이 먼저 무너진다 — 실측). 저장본이 없으면 아무 것도 안 한다.
+      python3 tools/color_lock.py restore >> logs/color_lock.log 2>&1 || true
+      LOG "8766 기동 완료·밝기 정규화·색점 노출 복원"; D435_UP=1
     fi
   elif [ "$USB" -eq 0 ] && [ "$D435_UP" -eq 1 ]; then
     LOG "D435 USB 빠짐 — 대기"; D435_UP=0
+  elif [ "$USB" -ge 1 ] && [ "$UP" -ge 1 ]; then
+    # ★9/5 추가: 서버는 살아있는데 '프레임 얼음' 또는 '검은 화면'인 경우(9/5 실증: 밝기 0.2)
+    dh=$(curl -s -m3 http://127.0.0.1:8766/raw 2>/dev/null | md5sum | awk '{print $1}')
+    dbr=$(curl -s -m3 http://127.0.0.1:8766/expo 2>/dev/null | grep -oE '"bright": *[0-9.]+' | grep -oE '[0-9.]+$')
+    dead=0
+    if [ -n "$dh" ] && [ "$dh" = "$d_prev_hash" ]; then d_frozen=$((d_frozen+1)); else d_frozen=0; fi
+    d_prev_hash="$dh"
+    [ "$d_frozen" -ge 3 ] && dead=1
+    if [ -n "$dbr" ] && awk "BEGIN{exit !($dbr < 5)}"; then dead=1; fi
+    if [ "$dead" -eq 1 ]; then
+      LOG "D435 이상(얼음 ${d_frozen}회 / 밝기 ${dbr:-?}) → 재기동"
+      pkill -f "cam_server.py --source rs" 2>/dev/null; sleep 2
+      ./start_cam.sh rs >> logs/cam_autostart_start.log 2>&1
+      for i in $(seq 1 20); do ss -tlnp 2>/dev/null | grep -q ':8766 ' && break; sleep 1; done
+      sleep 2; curl -s -m25 "http://127.0.0.1:8766/expo?bright=100" >/dev/null 2>&1
+      python3 tools/color_lock.py restore >> logs/color_lock.log 2>&1 || true
+      LOG "D435 재기동 완료·색점 노출 복원"; d_frozen=0; d_prev_hash=""
+    fi
   fi
 
   # ── ② 새카메라 8768: 죽음 or 얼어붙음 ──
