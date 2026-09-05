@@ -115,26 +115,38 @@ def wall_dots_cam1(ref):
     return pts
 
 
-def grasp_measure(color="blue"):
-    """공칭 파지 대비 편차 → GripMeasure. 반환 (grip, info) / 실패 (None, why)."""
+def grasp_measure(color="blue", rack_dang=None):
+    """설계 2단계: 잡은 벽이 그리퍼에 어떻게 물렸나 — 공칭 파지 서명 대비 편차 → GripMeasure.
+    점 2개면 위치+각, 점 1개(노랑·red_s)면 위치만(각은 랙 관측 각차 rack_dang 로). 축척은 뎁스 실측(d_w/fx).
+    반환 (grip, info) / 실패 (None, why)."""
     ref = load_grasp_ref(color)
     if ref is None:
-        return None, f"{color} 공칭 파지 서명 없음(사용자 수정 파지 1회 필요)"
+        return None, f"{color} 공칭 파지 서명 없음(`place_calc.py grasp {color} <개도>` 로 1회 기록)"
     pts = wall_dots_cam1(ref)
-    if len(pts) != 2:
-        return None, f"벽 점 {len(pts)}개(2 필요)"
-    (x1, y1, _), (x2, y2, _) = pts
-    ang = math.degrees(math.atan2(x2 - x1, y2 - y1)); mid = ((x1 + x2) / 2, (y1 + y2) / 2)
+    n_ref = len(ref.get("cam1_wall_pd") or [])
+    if len(pts) < 1:
+        return None, "든 벽 점 0개"
     scale = ref.get("wall_scale_mm_per_px")
     if not scale:
         m, _w = held_wall_depth(color)
         scale = m["mm_px"] if m else 0.12          # ★뎁스 실측 축척 우선, 없으면 옛 가상값(경고)
         print(f"  파지 축척: 뎁스 {m['d_w']:.0f}mm → {scale:.4f}mm/px" if m else "  ⚠ 파지 축척: 뎁스 실측 불가 → 가상값 0.12mm/px")
+    if len(pts) >= 2 and n_ref >= 2:
+        (x1, y1, _), (x2, y2, _) = pts[0], pts[-1]
+        ang = math.degrees(math.atan2(x2 - x1, y2 - y1)); mid = ((x1 + x2) / 2, (y1 + y2) / 2)
+        dang = HG.wrap_deg(ang - ref["cam1_wall_ang_deg"]); how = "2점"
+    else:
+        # 1점: 기준 점 자리에 가장 가까운 점 하나로 위치만. 각은 랙 관측 각차(없으면 0).
+        rx, ry = ref["cam1_wall_mid"]
+        q = min(pts, key=lambda t: math.hypot(t[0] - rx, t[1] - ry)); mid = (q[0], q[1])
+        dang = rack_dang if rack_dang is not None else 0.0; how = "1점" + ("+랙각" if rack_dang is not None else "")
     dx = mid[0] - ref["cam1_wall_mid"][0]; dy = mid[1] - ref["cam1_wall_mid"][1]
-    dang = HG.wrap_deg(ang - ref["cam1_wall_ang_deg"])
     across = ACROSS_SIGN * dx * scale; along = ALONG_SIGN * dy * scale
     grip = HG.GripMeasure(center=(across, along), angle_deg=90.0 + dang, bottom_dz=0.0)
-    return grip, {"dx_px": dx, "dy_px": dy, "dang": dang, "across_mm": across, "along_mm": along, "scale": scale}
+    return grip, {"dx_px": dx, "dy_px": dy, "dang": dang, "across_mm": across, "along_mm": along, "scale": scale, "how": how}
+
+
+GRASP_GATE_MM, GRASP_GATE_DEG = 1.0, 0.3     # 설계 2단계 게이트(9/4 v2.1). 넘으면 정지·보고, 자동 재파지 금지
 
 
 # ★뎁스 기반 벽 계측(9/5 밤, 사용자 설계 "잡으면 뎁스로 벽 길이를 재서 검산"). ⚠ 실기 미검증(로봇 꺼진 뒤 작성).
@@ -275,16 +287,19 @@ def capture_grasp_sig(color, grip_cmd):
     cv2.imwrite(f"/tmp/claude-1000/-home-ar/4c72d906-75dc-49ee-b7b6-6139e1b44a52/scratchpad/grasp_{color}.jpg", img)
     ref = json.load(open(GRASP_REF)) if os.path.exists(GRASP_REF) else {}
     ref.setdefault("by_color", {})
-    if len(pts) >= 2:
-        (x1, y1, _), (x2, y2, _) = pts[0], pts[-1]
-        ang = math.degrees(math.atan2(x2 - x1, y2 - y1)); L = math.hypot(x2 - x1, y2 - y1)
+    if len(pts) >= 1:
+        if len(pts) >= 2:
+            (x1, y1, _), (x2, y2, _) = pts[0], pts[-1]
+            ang = math.degrees(math.atan2(x2 - x1, y2 - y1)); L = math.hypot(x2 - x1, y2 - y1); mid = [(x1 + x2) / 2, (y1 + y2) / 2]
+        else:
+            ang, L, mid = 0.0, 0.0, [pts[0][0], pts[0][1]]          # 1점(노랑·red_s): 위치 서명만
         ref["by_color"][color] = {"made": time.strftime("%Y-%m-%d %H:%M"), "grip_cmd": grip_cmd, "grip_real": gr, "tcp": tcp0,
             "cam1_wall_pd": [[q[0], q[1], q[2]] for q in pts], "cam1_wall_ang_deg": ang, "cam1_wall_gap_px": L,
-            "cam1_wall_mid": [(x1 + x2) / 2, (y1 + y2) / 2],
+            "cam1_wall_mid": mid,
             "cam1_wall_detect": {"hsv_lo": list(lo), "hsv_hi": list(hi), "area": [500, 6000], "x_min": 600}}
-        print(f"  서명 저장: 각 {ang:+.2f}° 간격 {L:.0f}px")
+        print(f"  서명 저장({len(pts)}점): 각 {ang:+.2f}° 간격 {L:.0f}px 중점 ({mid[0]:.0f},{mid[1]:.0f})")
     else:
-        print("  ⚠ 벽 점 2개 미만 — 서명 저장 안 함(공칭 파지로 진행됨)")
+        print("  ⚠ 벽 점 0개 — 서명 저장 안 함")
     json.dump(ref, open(GRASP_REF, "w"), ensure_ascii=False, indent=1)
     pr = json.load(open(PICK_REF)) if os.path.exists(PICK_REF) else {}
     pr[color] = {"tcp": tcp0, "grip_close": int(grip_cmd), "grip_real": gr, "made": time.strftime("%Y-%m-%d %H:%M"),
@@ -310,8 +325,13 @@ def wall_delta_now(color, yaw_now):
     return (dx * math.cos(a) - dy * math.sin(a), dx * math.sin(a) + dy * math.cos(a))
 
 
-def plan(color, grip=None, holding=False):
-    """관측자세에서 베이스 자세 → 목표. 로봇이 관측자세가 아니면 관측자세로 간다(자유공간)."""
+USE_LEGACY_DELTA = False   # ★벽별 상수 보정(WALL_DELTA/RZ_BIAS)은 파지 치우침을 상수화한 것 → 호버 정렬이 있으면 끈다(설계 3단계)
+BASE_LAST = "/home/ar/bf2_console/base_pose_last.json"
+
+
+def measure_base(holding=False):
+    """설계 3단계 앞부분: 관측자세(z650)에서 베이스 자세(로봇 좌표). 로봇이 관측자세가 아니면 간다(자유공간).
+    ★매 사이클 빈 손으로 호출한다(직전 벽 삽입이 베이스를 밀 수 있으니). 직전 측정과의 차이를 같이 보고."""
     import slot_target as STG
     cur = st()["tcp"]
     if max(abs(cur[i] - OBS[i]) for i in range(3)) > 2.0:
@@ -321,122 +341,155 @@ def plan(color, grip=None, holding=False):
         speed(1)
     Jinv, mp = STG.load_map()
     if not health_gate():
-        raise RuntimeError("검출 건강 게이트 실패")
-    px4, why = STG.pillars_px(mask_held=holding)      # ★벽 든 채면 든 벽 영역 마스크
+        raise RuntimeError("검출 건강 게이트 실패(기둥 4점 미달) — 이동 금지")
+    px4, why = STG.pillars_px(mask_held=holding)
     if px4 is None:
         raise RuntimeError("기둥 검출 실패: " + str(why))
     a = json.load(open(STG.ANCH))
     pose, rms, _ = STG.base_pose_robot(px4, Jinv, tuple(a["C"]), tuple(a["p0"]))
+    prev = json.load(open(BASE_LAST)) if os.path.exists(BASE_LAST) else None
+    if prev:
+        print(f"  베이스 이동(직전 측정 대비): Δx {pose.x - prev['x']:+.2f} Δy {pose.y - prev['y']:+.2f} Δyaw {HG.wrap_deg(pose.yaw_deg - prev['yaw']):+.3f}°  (직전 {prev['made']})")
+    json.dump({"x": pose.x, "y": pose.y, "yaw": pose.yaw_deg, "rms": rms, "made": time.strftime("%Y-%m-%d %H:%M:%S")}, open(BASE_LAST, "w"))
+    print(f"  베이스(로봇) x {pose.x:.2f} y {pose.y:.2f} yaw {pose.yaw_deg:+.3f}° rms {rms:.2f}mm  (기준점 {a['color']} {a['made']})")
+    return {"base": pose, "rms": rms, "anchor": a["color"], "anchor_made": a["made"]}
+
+
+def target_for(color, B, grip=None):
+    """베이스 자세 B + 파지 측정 grip → 그 벽의 목표 TCP (x, y, rz)."""
+    import slot_target as STG
+    pose = B["base"]
     slot = HG.SLOTS[STG.WALL_SLOT[color]]
-    rz_ref = json.load(open(CAL))["refs"][color]["insert_tcp"][5]      # 골든 rz 에 가까운 동치각
+    rz_ref = json.load(open(CAL))["refs"][color]["insert_tcp"][5]
     tgt, _dj = HG.target_tcp(pose, slot, grip or STG.grip_nominal(color), rz_ref)
-    rz = HG.wrap_deg(STG.rz_line_sym(tgt.yaw_deg, rz_ref) + RZ_BIAS)
-    ddx, ddy = wall_delta_now(color, pose.yaw_deg)
-    return {"base": pose, "rms": rms, "x": tgt.x + ddx, "y": tgt.y + ddy, "rz": rz, "delta": (ddx, ddy),
-            "anchor": a["color"], "anchor_made": a["made"]}
+    rz = HG.wrap_deg(STG.rz_line_sym(tgt.yaw_deg, rz_ref) + (RZ_BIAS if USE_LEGACY_DELTA else 0.0))
+    ddx, ddy = wall_delta_now(color, pose.yaw_deg) if USE_LEGACY_DELTA else (0.0, 0.0)
+    return dict(B, x=tgt.x + ddx, y=tgt.y + ddy, rz=rz, delta=(ddx, ddy))
 
 
-def run(color, seat=False, do_pick=True, target=None, align=True, len_gate=False):
-    """target=(x,y,rz) 를 주면 관측자세 재측정 없이 그 목표로 간다(같은 종류 벽의 실제 안착에서 옮긴 값 등)."""
-    pick, hover, g_open, g_close = pick_pose(color)
-    grip = None
-    if not do_pick and target is None:
-        g, info = grasp_measure(color)
-        if g: grip = g; print(f"파지 편차: 가로 {info['across_mm']:+.2f}mm 길이 {info['along_mm']:+.2f}mm 각 {info['dang']:+.2f}° (Δpx {info['dx_px']:+.1f},{info['dy_px']:+.1f}, 축척 {info['scale']})")
-        else: print("파지 편차 측정 불가:", info, "→ 공칭 파지로 진행")
-    if target is not None:
-        P = {"x": target[0], "y": target[1], "rz": target[2], "delta": (0.0, 0.0), "anchor": "직접지정", "anchor_made": "-",
-             "base": HG.Pose2D(0.0, 0.0, 0.0), "rms": 0.0}
-    else:
-        P = plan(color, grip, holding=not do_pick)
-    print(f"베이스(로봇) x {P['base'].x:.2f} y {P['base'].y:.2f} yaw {P['base'].yaw_deg:+.3f}° rms {P['rms']:.2f}mm  "
-          f"(기준점 {P['anchor']} {P['anchor_made']})")
-    print(f"목표 [{color}] x {P['x']:.2f} y {P['y']:.2f} rz {P['rz']:+.2f}  (벽별 보정 {P['delta'][0]:+.1f},{P['delta'][1]:+.1f})  호버 z{HOVER_Z:.0f} 안착 z{SEAT_Z[color]:.0f}")
-    tgt_rot = [180.0, 0.0, P["rz"]]
+def plan(color, grip=None, holding=False):
+    return target_for(color, measure_base(holding), grip)
+
+
+def _grip_ok(gr, g_close, color):
+    """파지 판정: 실측 > 닫힘값이면 물었음. 같으면(red_s 는 물어도 8→8) 손목캠 벽 점으로 2차 판정."""
     try:
-        if do_pick:
-            speed(SPD_MOVE)
-            cur = st()["tcp"]
-            move([cur[0], cur[1], SAFE_Z] + list(cur[3:]), tag="상승 SAFE")
-            move([hover[0], hover[1], SAFE_Z] + list(hover[3:]), tag="랙 위 SAFE")
-            print("  그리퍼 열기 →", gripper(g_open))
-            # ★랙 관측 중앙자세에서 벽 전체 보고(4/4 아니어도 벽 양끝) 파지 XY 계산(캘리브 기반) → 하강 파지
-            obs = json.load(open(RACK_OBS))["tcp"]
-            speed(SPD_MOVE); move([hover[0], hover[1], obs[2]] + [180.0, 0.0, 180.0], tag="관측 높이")
-            move(obs, tag="랙 중앙 관측자세")
-            tg = rack_grip_xy(color)
-            if tg is None:
-                print("  랙 캘리브 없음 → 골든 파지 XY 그대로"); gx, gy = pick[0], pick[1]
-            else:
-                gx, gy = tg[0], tg[1]
-                e = rack_ends(color)
-                print(f"  랙 관측: 벽 중앙 ({e['mid'][0]:.0f},{e['mid'][1]:.0f}) 길이 {e['len_px']:.0f}px 각 {e['ang']:+.2f}° → 파지 XY ({gx:.1f},{gy:.1f}) 각차 {tg[2]:+.2f}°")
-                rack_len_check(color, e, strict=len_gate)   # ★뎁스로 물리 길이 검산(색점과 독립). 기본 보고, --len-gate 면 정지
-            speed(SPD_MOVE); move([gx, gy, obs[2]] + list(pick[3:]), tag="파지 XY 위(관측 높이)")
-            speed(SPD_DESC); move([gx, gy, pick[2] + 40] + list(pick[3:]), tag="픽 −40")
-            speed(SPD_SEAT); move([gx, gy, pick[2]] + list(pick[3:]), tol=0.8, tag="픽 자세")
-            pick = [gx, gy, pick[2]] + list(pick[3:])
-            gr = gripper(g_close); print("  그리퍼 닫기 →", gr)
-            try:
-                gv = int(gr)
-            except Exception:
-                gv = -1
-            # ★빈 파지 = 실측이 닫힘 명령값 그대로(노랑 15→15, 빨강 13→13 실증). 물면 +1 이상(파랑 7→13, 노랑 8→15, 빨강 13→14~15).
-            #   단 red_s(얇은 짧은 벽)는 물어도 8→8 (9/3 골든·9/5 실증) → 실측이 명령값이면 손목캠 벽 점으로 2차 판정.
-            if gv < 0 or gv <= g_close:
-                held = held_wall_dots(color)
-                if not held:
-                    raise RuntimeError(f"빈 파지 의심(실측 {gr}, 닫힘 {g_close}, 손목캠 벽 점 없음) — 정지")
-                print(f"  그리퍼 값은 명령값과 같지만 손목캠에 벽 점 {len(held)}개 → 물고 있음으로 판정")
-            speed(SPD_DESC); move(hover, tag="들어올림")
-            hd, _w = held_wall_depth(color)          # ★든 벽 뎁스(축척·축 각) — 길이는 클리핑으로 못 잼
-            if hd: print(f"  든 벽 뎁스 {hd['d_w']:.0f}mm · 축 {hd['ang_img']:+.2f}° · 폭 {hd['span_px']:.0f}px")
+        gv = int(gr)
+    except Exception:
+        gv = -1
+    if gv > g_close:
+        return True, f"그리퍼 {gr} > 닫힘 {g_close}"
+    held = held_wall_dots(color)
+    if held:
+        return True, f"그리퍼 {gr} = 닫힘값이지만 손목캠 벽 점 {len(held)}개"
+    return False, f"그리퍼 {gr}, 닫힘 {g_close}, 벽 점 0"
+
+
+def run(color, seat=False, do_pick=True, target=None, align=True, len_gate=False, grasp_gate=True):
+    """★설계 4단계 고정 순서(9/5 밤, 사용자 설계):
+      ① 빈 손 베이스 재확인(관측자세)  — 매 사이클(직전 삽입이 베이스를 밀 수 있음)
+      ② 랙 재관측 → 벽 중앙 → 하강 파지 → 파지 판정  — 매 픽(픽마다 랙이 밀림)
+      ③ 20mm 상승 미끄러짐 확인 → 파지 편차 측정(게이트) → ①의 베이스로 목표 TCP → 운반 → 호버 z478 → 파지 재확인 → z+85
+      ④ z+85 에서 두 카메라 호버 정렬(기둥 기준 상대) → 정렬된 TCP 로 막힘감시 하강 → 안착 시 기준 자동 승격
+    target=(x,y,rz) 를 주면 ①③ 계산을 건너뛰고 그 목표로(디버그용). --no-pick 은 이미 든 상태(①은 든 채 마스크 측정)."""
+    pick, hover, g_open, g_close = pick_pose(color)
+    grip = None; rack_dang = None
+    tgt_rot = None
+    try:
+        # ---------- ① 베이스 재확인
+        if target is not None:
+            P = {"x": target[0], "y": target[1], "rz": target[2], "delta": (0.0, 0.0), "anchor": "직접지정", "anchor_made": "-",
+                 "base": HG.Pose2D(0.0, 0.0, 0.0), "rms": 0.0}; B = P
+            print("  ⚠ 목표 직접 지정 — 베이스 측정 생략")
+        elif do_pick:
+            print("① 베이스 재확인(빈 손)"); B = measure_base(holding=False)
+        else:
+            print("① 베이스 재확인(든 채, 마스크)"); B = measure_base(holding=True)
             g, info = grasp_measure(color)
-            if target is None:
-                if g: print(f"  파지 편차: 가로 {info['across_mm']:+.2f}mm 길이 {info['along_mm']:+.2f}mm 각 {info['dang']:+.2f}°")
-                P = plan(color, g, holding=True)            # ★픽 직후 관측자세 재측정(든 벽 마스크)
-                print(f"  목표 갱신 [{color}] x {P['x']:.2f} y {P['y']:.2f} rz {P['rz']:+.2f}")
-                tgt_rot = [180.0, 0.0, P["rz"]]
+            if g: grip = g; print(f"  파지 편차({info['how']}): 가로 {info['across_mm']:+.2f} 길이 {info['along_mm']:+.2f}mm 각 {info['dang']:+.2f}°")
+            else: print("  ⚠ 파지 편차 측정 불가:", info)
+        # ---------- ② 랙 재관측 → 파지
+        if do_pick:
+            print("② 랙 재관측 → 중앙 파지")
+            speed(SPD_MOVE); cur = st()["tcp"]
+            move([cur[0], cur[1], SAFE_Z] + list(cur[3:]), tag="상승 SAFE")
+            obs = json.load(open(RACK_OBS))["tcp"]
+            move([obs[0], obs[1], SAFE_Z, 180.0, 0.0, 180.0], tag="랙 위 SAFE")
+            print("  그리퍼 열기 →", gripper(g_open))
+            move(obs, tag="랙 중앙 관측자세")
+            tg = rack_grip_xy(color)                      # ★매번 새 프레임(4장)으로 벽 중앙·길이 게이트
+            if tg is None:
+                raise RuntimeError("랙 관측에서 벽 중앙을 못 잡음(캘리브 없음/끝점 누락/길이 불일치) — 파지 중단")
+            gx, gy, rack_dang = tg
+            e = rack_ends(color, x_hint=json.load(open(RACK_CALIB))[color]["Pc0"][0])
+            print(f"  랙: 벽 중앙 ({e['mid'][0]:.0f},{e['mid'][1]:.0f}) 길이 {e['len_px']:.0f}px 각 {e['ang']:+.2f}° → 파지 XY ({gx:.1f},{gy:.1f}) 각차 {rack_dang:+.2f}°")
+            rack_len_check(color, e, strict=len_gate)     # 뎁스 물리 길이 검산(색점과 독립)
+            rot = [180.0, 0.0, 180.0]                     # ★랙 하강은 항상 rz 180(9/5: −177 잔류 → 3° 물림·동결)
+            speed(SPD_MOVE); move([gx, gy, obs[2]] + rot, tag="파지 XY 위(관측 높이)")
+            speed(SPD_DESC); move([gx, gy, pick[2] + 40] + rot, tag="픽 −40")
+            speed(SPD_SEAT); move([gx, gy, pick[2]] + rot, tol=0.8, tag="픽 자세")
+            gr = gripper(g_close); print("  그리퍼 닫기 →", gr)
+            ok, why = _grip_ok(gr, g_close, color)
+            if not ok:
+                raise RuntimeError("빈 파지 의심(" + why + ") — 정지")
+            print("  파지 판정 OK:", why)
+            # ---------- ③ 미끄러짐 확인 → 파지 편차 → 목표
+            print("③ 파지 검증 → 목표 계산")
+            speed(SPD_DESC); move([gx, gy, pick[2] + 20] + rot, tag="+20 미끄러짐 확인")
+            time.sleep(0.4); ok, why = _grip_ok(grip_read(), g_close, color)
+            if not ok:
+                raise RuntimeError("20mm 상승 후 파지 이탈(" + why + ") — 정지")
+            move([gx, gy, hover[2]] + rot, tag="들어올림")
+            hd, _w = held_wall_depth(color)
+            if hd: print(f"  든 벽 뎁스 {hd['d_w']:.0f}mm · 축 {hd['ang_img']:+.2f}° · 폭 {hd['span_px']:.0f}px")
+            g, info = grasp_measure(color, rack_dang=rack_dang)
+            if g is None:
+                if grasp_gate:
+                    raise RuntimeError("파지 편차 측정 불가: " + str(info) + " — 정지(--no-grasp-gate 로만 우회)")
+                print("  ⚠ 파지 편차 측정 불가:", info, "→ 공칭 파지")
             else:
-                print("  파지 편차 측정 불가:", info, "→ 공칭 파지 목표 유지")
-        speed(SPD_MOVE)
-        cur = st()["tcp"]
+                grip = g
+                print(f"  파지 편차({info['how']}): 가로 {info['across_mm']:+.2f} 길이 {info['along_mm']:+.2f}mm 각 {info['dang']:+.2f}° (축척 {info['scale']:.4f})")
+                if grasp_gate and (abs(info['along_mm']) > GRASP_GATE_MM or abs(info['across_mm']) > GRASP_GATE_MM or abs(info['dang']) > GRASP_GATE_DEG):
+                    raise RuntimeError(f"파지 편차 게이트 초과(길이 {info['along_mm']:+.2f} 가로 {info['across_mm']:+.2f}mm 각 {info['dang']:+.2f}°) — 정지, 재파지는 사용자 판단")
+        if target is None:
+            P = target_for(color, B, grip)                # ★①의 베이스(빈 손 측정) + 파지 측정 → 목표. 든 채 재측정 안 함
+        print(f"  목표 [{color}] x {P['x']:.2f} y {P['y']:.2f} rz {P['rz']:+.2f}  호버 z{HOVER_Z:.0f} 안착 z{SEAT_Z[color]:.0f}"
+              + ("" if not USE_LEGACY_DELTA else f"  (구 상수보정 {P['delta'][0]:+.1f},{P['delta'][1]:+.1f})"))
+        tgt_rot = [180.0, 0.0, P["rz"]]
+        speed(SPD_MOVE); cur = st()["tcp"]
         move([cur[0], cur[1], SAFE_Z] + list(cur[3:]), tag="상승 SAFE")
         move([P["x"], P["y"], SAFE_Z] + tgt_rot, tag="목표 위 SAFE(rz 정렬)")
-        # ★운반 후 파지 재확인(9/5 이탈 사고): 벽 점 소실이면 정지(놓친 벽으로 하강 금지)
-        held = held_wall_dots(color)
-        gnow = grip_read()
-        if not held:
-            raise RuntimeError(f"운반 후 파지 이탈 의심(그리퍼 {gnow}, 벽 점 0) — 정지")
-        print(f"  운반 후 파지 재확인 OK(그리퍼 {gnow}, 벽 점 {len(held)})")
-        speed(SPD_DESC)
-        move([P["x"], P["y"], HOVER_Z] + tgt_rot, tag="★목표 호버 z478")
-        print(f"  그리퍼 실측 {grip_read()}  (벽 밀림 감시: 닫힘 {g_close} 근처면 놓친 것)")
+        ok, why = _grip_ok(grip_read(), g_close, color)     # ★운반 후 파지 재확인(9/5 이탈 사고)
+        if not ok:
+            raise RuntimeError("운반 후 파지 이탈 의심(" + why + ") — 정지")
+        print("  운반 후 파지 재확인 OK:", why)
+        speed(SPD_DESC); move([P["x"], P["y"], HOVER_Z] + tgt_rot, tag="목표 호버 z478")
         if not seat:
-            print("호버 정지. 카메라/육안으로 슬롯 위 정렬 확인 후 --seat 로 하강.")
-            return
+            print("호버 정지. --seat 를 주면 z+85 에서 호버 정렬 후 하강."); return
+        # ---------- ④ 호버 정렬 → 하강
         zs = SEAT_Z[color]
-        speed(SPD_SEAT)
-        move([P["x"], P["y"], zs + 85] + tgt_rot, tag="기둥 꼭대기 위 z+85")
-        # ★호버 정렬(9/5 밤 신설, 사용자 설계): 같은 프레임에서 든 벽 점 ↔ 베이스 특징을 기준 관계에 맞춘다.
-        #   계산 목표(z650 관측 1회)의 잔차 = 파지 치우침 + 베이스 미세 이동 — 이걸 여기서 흡수. 기준 없으면 하강 금지.
+        speed(SPD_SEAT); move([P["x"], P["y"], zs + 85] + tgt_rot, tag="기둥 꼭대기 위 z+85")
+        print("④ 호버 정렬(두 카메라, 기둥 기준 상대)")
+        import hover_align as HA
         if align:
-            import hover_align as HA
             if HA.load_ref(color) is None:
-                raise RuntimeError(f"{color} 호버 기준 없음 — 사용자가 z+85 에서 정렬 확인 후 `hover_align.py ref {color}` 로 저장할 것 (--no-align 으로만 우회)")
-            HA.align(color)                                   # 미수렴·발산·측정 실패 = 예외 → 정지
-            cur = st()["tcp"]                                 # ★정렬로 움직인 TCP 를 하강 XY/rz 로(옛 P 로 내리면 정렬을 되돌린다)
+                raise RuntimeError(f"{color} 호버 기준 없음 — z+85 에서 사용자 정렬 확인 후 `hover_align.py ref {color}` (--no-align 으로만 우회)")
+            HA.align(color)                                # 미수렴·발산·측정 실패·카메라 불일치 = 예외 → 정지
+            cur = st()["tcp"]                              # ★정렬로 움직인 TCP 로 하강(옛 P 로 내리면 정렬이 되돌아감)
             P["x"], P["y"] = cur[0], cur[1]; tgt_rot = [180.0, 0.0, cur[5]]
             print(f"  정렬 후 하강 기준 x {cur[0]:.2f} y {cur[1]:.2f} rz {cur[5]:+.2f}")
         else:
             print("  ⚠ 호버 정렬 생략(--no-align)")
         descend_monitored(color, P["x"], P["y"], tgt_rot, zs, g_close)
+        if align:
+            HA.promote_ref(color)                          # ★안착 성공 사이클의 정렬 상태를 다음 기준으로
     except Exception as e:
         post("stop", {"dry_run": False})
         print("❌ 정지:", e)
     finally:
         speed(1)
-        s = st(); print("현재 tcp", [round(v, 1) for v in s["tcp"]], "grip", s.get("gripper"), "frozen", s.get("frozen"))
+        s_ = st(); print("현재 tcp", [round(v, 1) for v in s_["tcp"]], "grip", s_.get("gripper"), "frozen", s_.get("frozen"))
 
 
 def held_wall_dots(color):
@@ -824,7 +877,7 @@ if __name__ == "__main__":
         if "--target" in sys.argv:
             i = sys.argv.index("--target"); tgt = (float(sys.argv[i + 1]), float(sys.argv[i + 2]), float(sys.argv[i + 3]))
         run(color, seat="--seat" in sys.argv, do_pick="--no-pick" not in sys.argv, target=tgt,
-            align="--no-align" not in sys.argv, len_gate="--len-gate" in sys.argv)
+            align="--no-align" not in sys.argv, len_gate="--len-gate" in sys.argv, grasp_gate="--no-grasp-gate" not in sys.argv)
     elif mode == "held_depth":          # 벽 든 채(어느 높이든): 뎁스·축척·축 각
         m, why = held_wall_depth(color)
         print("❌ " + why if m is None else f"[{color}] 든 벽 뎁스 {m['d_w']:.0f}mm · {m['mm_px']:.4f}mm/px · 축 {m['ang_img']:+.2f}° · 폭 {m['span_px']:.0f}px · 중심 ({m['center_px'][0]:.0f},{m['center_px'][1]:.0f}) · 점 {m['n']}")
