@@ -160,7 +160,7 @@ def wall_scale(color):
 
 
 def save_grasp_sig_now(color, grip_cmd, gr):
-    """★든 상태에서 지금 손목캠 벽 점을 공칭 파지 서명으로 저장(그리퍼 조작 없음). gap_mm 주면 축척도 캘리브."""
+    """★든 상태에서 지금 손목캠 벽 점을 공칭 파지 서명으로 저장(그리퍼 조작 없음). 축척은 wall_scale(color) 상수."""
     import cv2, numpy as np
     lo, hi = WALL_DOT_HSV[color]
     b = UR.urlopen("http://127.0.0.1:8766/raw", timeout=5).read()
