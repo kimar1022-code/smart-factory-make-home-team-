@@ -1,6 +1,6 @@
 ---
 name: session-0905-night-hover-align
-description: "9/5 밤(로봇 OFF) — 사용자 지적 '설계한 보정 3개가 하나도 안 들어간 채 꽂고 있었다' 확인·원인 5가지 자백 → 호버 정렬(hover_align.py) 신설·오프라인 실증(사용자 nudge 3건과 부호·크기 일치) + place_calc run 배선(기준 없으면 하강 금지) + 뎁스 축척·랙 뎁스 길이 검산(미검증). 내일 첫 행동 = 파랑 z440 정렬 확인 후 hover_align ref blue"
+description: "9/5 밤(로봇 OFF) — 설계 4단계를 run 에 고정 순서로 배선(매 사이클 빈손 베이스 재확인·매 픽 랙 재관측·20mm 미끄러짐·파지 게이트·2캠 호버 정렬·성공 시 기준 승격), 모의 브리지 6시나리오 통과. — 사용자 지적 '설계한 보정 3개가 하나도 안 들어간 채 꽂고 있었다' 확인·원인 5가지 자백 → 호버 정렬(hover_align.py) 신설·오프라인 실증(사용자 nudge 3건과 부호·크기 일치) + place_calc run 배선(기준 없으면 하강 금지) + 뎁스 축척·랙 뎁스 길이 검산(미검증). 내일 첫 행동 = 파랑 z440 정렬 확인 후 hover_align ref blue"
 metadata:
   node_type: memory
   type: project
@@ -40,3 +40,16 @@ metadata:
 2. 노랑·빨강 같은 절차로 ref. red_s 는 둘 다 보이는 정렬 자세 먼저 찾기(z478~520 또는 XY 이동).
 3. `held_depth`·`rack_len` 수치 확인 → 맞으면 `--len-gate` 상시화.
 [[session-0905-base-pose-color-pillars]] · [[rule-read-yesterday-memory-first]] · [[rule-base-moves-aruco-board-fixed]]
+
+
+## 5. (23:3x) 사용자 설계 4단계 재검증 → `run` 전면 재작성 (백업 `place_calc.py.0905_2300_prealign_bak`)
+사용자 설계: ①랙 전체 보고 중앙 찾아 픽 ②픽한 벽 길이로 정상 파지와 비교 ③벽 물고 베이스 전체 보는 곳에서 yaw·x·y 로 조정 후 z440 ④z440 에서 뎁스캠+새카메라로 기둥↔벽점 관계 보고 한 번 더 조정 후 삽입.
++ 사용자 추가 지시: **매 사이클 벽 꽂기 전 빈 손으로 베이스 재확인(삽입이 베이스를 밀 수 있음), 매 픽 전 랙 무조건 재관측(픽마다 랙이 밀림).**
+
+내가 낸 정정 3건(사용자 설계와 다른 점): (a) ②의 "길이"는 손목캠으론 불가(든 벽이 프레임보다 큼) → 랙에서 길이 게이트(전체 보임) + 픽 후 파지 편차·미끄러짐 검증으로 분리 (b) ③의 베이스 측정은 빈 손 픽 전이 깨끗(든 채 뎁스 오검출 실패 이력) → 매 사이클 ① 로 (c) `WALL_DELTA`·`RZ_BIAS` 상수는 파지 치우침 상수화라 제거(`USE_LEGACY_DELTA=False`). ①의 랙 각차(rack_dang)는 그리퍼 내 벽 yaw 로 1점 벽 파지 각에 사용.
+
+`run` 고정 순서(코드): ① `measure_base(holding=False)` 관측자세·4점 게이트·직전 측정 대비 Δ 출력(`base_pose_last.json`) → ② 랙 관측자세 → `rack_grip_xy`(새 프레임 4장, 길이 ±10% 게이트) → `rack_len_check`(뎁스, 보고) → rz 180 고정 하강 → 파지 판정(`_grip_ok`: 그리퍼>닫힘 또는 벽점) → ③ +20mm 미끄러짐 재판정 → 들어올림 → `held_wall_depth`(축척) → `grasp_measure(rack_dang)`(2점/1점, **게이트 1.0mm/0.3° 초과·측정불가 = 정지**, `--no-grasp-gate` 우회) → `target_for(①베이스, 파지)` → SAFE → 목표 위 → 파지 재확인 → z478 → ④ z+85 → `hover_align.align`(가용 카메라 전부, 불일치 1.5mm/0.6° 정지) → **정렬된 현재 TCP** 로 `descend_monitored` → 안착 성공 시 `promote_ref`(그 사이클 정렬 상태를 다음 기준으로).
+- `grasp_measure`·`capture_grasp_sig` 1점 벽 지원(노랑·red_s 서명 저장 가능).
+- `hover_align` 2카메라: wrist(moving=base, δ=+Jinv·Δ, 높이·rz 환산) / newcam(moving=wall, δ=−Jinv·Δ, `probe newcam --wall x,y` 로 z440 ±10mm 조그 매핑 + rz+2° 로 rot_sign 실측). 새카메라 ref 는 `ref <색> --src newcam --wall x,y[,x,y]`(8768 오버레이 좌표). 새카메라는 **사용자가 옮겨 놓아 재고정 필요**.
+- ★**모의 브리지 검증 6/6**(`scratchpad/mock_run.py`): 정상 풀사이클 순서 정확·정렬 후 TCP 로 하강·승격 / 빈 파지 정지 / 파지 편차 +2.3mm 정지 / 호버 기준 없음 정지 / 정렬 발산 정지 / 랙 중앙 실패 정지. 오프라인 프레임 회귀 3/3 유지.
+- 실기 미검증 목록: ROT_SIGN(wrist −1), `held_wall_depth`·`rack_len_depth` 수치, 새카메라 전체, 파지 게이트 문턱(1.0mm 이 너무 빡빡하면 1.5 로), `HELD_WALL_BOX`(--no-pick 경로만).
