@@ -23,7 +23,8 @@
   hover_align.py ref   <색> [--src wrist|newcam] [--wall x,y[,x,y]]   # 지금 프레임을 기준으로(새카메라는 벽 점 좌표 지정)
   hover_align.py check <색>                                           # 모든 가용 카메라 Δ(이동 없음)
   hover_align.py align <색> [--dry]                                   # 보정 루프(1% 속도, ≤3mm/0.5° 스텝)
-  hover_align.py probe newcam                                         # 새카메라 매핑(벽 든 채 z440, ±10mm 조그)
+  hover_align.py probe <newcam|side> <색> --wall x,y[,x,y]           # 고정카메라 매핑(벽 든 채 z440, ±10mm 조그)
+  hover_align.py detect <색> [--src side|newcam|wrist]                # 지금 프레임 검출만 출력(기준 없이)
   hover_align.py test  <색> ref.jpg now.jpg [z] [--rz r] [--save out]   # 손목캠 저장 프레임 오프라인 검증
 """
 import sys, os, json, math, time
@@ -40,17 +41,30 @@ MAP = "/home/ar/bf2_console/cam2robot_observe.json"
 NEWCAM_MAP = "/home/ar/bf2_console/cam2robot_newcam.json"
 REF = "/home/ar/bf2_console/hover_ref_0905.json"
 D_OBS, Z_OBS, RZ_MAP = 377.0, 650.0, 180.0
-SRC = {"wrist": {"url": "http://127.0.0.1:8766/raw", "moving": "base"},
-       "newcam": {"url": "http://127.0.0.1:8768/raw", "moving": "wall"}}
-ROT_SIGN = {"wrist": -1.0, "newcam": None}     # newcam 은 probe 가 채움(파일)
-SEARCH_PX, WALL_NEAR_PX = 140.0, 80.0
+# 카메라 3대. moving: 로봇이 움직일 때 화면에서 움직이는 쪽(손목캠=베이스, 고정캠=든 벽). 매핑 파일은 고정캠은 probe 로 생성.
+SRC = {"wrist":  {"url": "http://127.0.0.1:8766/raw", "moving": "base", "map": None},
+       "newcam": {"url": "http://127.0.0.1:8768/raw", "moving": "wall", "map": "/home/ar/bf2_console/cam2robot_newcam.json"},
+       "side":   {"url": "http://127.0.0.1:8771/raw", "moving": "wall", "map": "/home/ar/bf2_console/cam2robot_side.json"}}
+ROT_SIGN = {"wrist": -1.0}                      # 고정캠은 probe 가 rot_sign 을 파일에 저장
+# 소스별 검출 파라미터(9/6 새벽 라이브 프레임 실측): 새카메라 파랑 V≈100(손목캠 범위 V140 미달), 측면캠 640×480 점 면적 29~118
+DET = {"wrist":  {"amin_wall": 150, "feat_area": (60, 1400), "near": 80.0, "search": 140.0, "ranges": None},
+       "newcam": {"amin_wall": 40,  "feat_area": (20, 1400), "near": 60.0, "search": 120.0,
+                  "ranges": {"blue": ((95, 150, 70), (118, 255, 255)), "yellow": ((15, 80, 110), (40, 255, 255)),
+                             "red": ((160, 120, 80), (180, 255, 255))}},
+       "side":   {"amin_wall": 12,  "feat_area": (10, 400), "near": 30.0, "search": 60.0,
+                  "ranges": {"blue": ((95, 120, 80), (125, 255, 255)), "yellow": ((15, 60, 100), (40, 255, 255)),
+                             "red": ((160, 80, 60), (180, 255, 255))}}}
 HELD_BOX = (820, 0, 1280, 720)                  # 손목캠에서 든 벽이 보이는 영역(ref 생성 시)
 SCALE_TOL, RMS_TOL_PX = 0.03, 6.0
 MAX_STEP_MM, MAX_STEP_DEG = 3.0, 0.5
 TOL_MM, TOL_DEG = 0.3, 0.15
 COMBINE_TOL_MM, COMBINE_TOL_DEG = 1.5, 0.6
 MAX_ITER = 5
-FEAT_AREA = {"wrist": (60, 1400), "newcam": (20, 1400)}
+# ★z440 노출: 관측자세(z650)용 417 이면 가까워진 기둥 점이 하얗게 날아간다(9/6 00:5x 라이브: 노랑 S4·V255, 파랑 H90·V251 → 검출 0).
+#   이것이 "벽 물고 가까워지면 기둥점·벽점 인식 안 됨"의 원인. 라이브 재현(00:5x, 관측 노출 417): 333/250/167 은 파랑만, 83 에서 파랑+노랑.
+#   호버 정렬은 플리커 안전값 사다리(250·167·83)를 전부 시도해 기준 특징이 가장 많이 매칭되는 노출을 고르고, 끝나면 관측 노출로 복원.
+HOVER_EXPO_LADDER = (250, 167, 83)
+NEWCAM_MAP = SRC["newcam"]["map"]
 WALL_DOT_HSV = {
     "blue":   ((95, 150, 140), (115, 255, 255)),
     "yellow": ((15, 80, 110), (38, 255, 255)),
@@ -65,28 +79,32 @@ def grab(src="wrist"):
     return cv2.imdecode(np.frombuffer(b, np.uint8), cv2.IMREAD_COLOR)
 
 
-def _blobs(img, color, amin):
-    lo, hi = WALL_DOT_HSV[color]
+def _blobs(img, color, amin, src="wrist"):
+    rng = DET[src]["ranges"]
+    lo, hi = (rng[color if color != "red_s" else "red"] if rng else WALL_DOT_HSV[color])
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     m = cv2.inRange(hsv, np.array(lo, np.uint8), np.array(hi, np.uint8))
-    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    if src == "wrist":
+        m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     n, lab, st, cen = cv2.connectedComponentsWithStats(m)
     return [(float(cen[i][0]), float(cen[i][1]), int(st[i, 4])) for i in range(1, n) if st[i, 4] >= amin]
 
 
 def wall_dots(img, color, ref=None, seeds=None, src="wrist"):
-    """든 벽 점(1~2). ref 있으면 기준 자리 ±WALL_NEAR_PX 의 같은 색 점(물린 벽은 화면에서 거의 안 움직임).
-    seeds(ref 생성용 좌표) 있으면 그 근처. 둘 다 없으면 손목캠 HELD_BOX 안 큰 점."""
-    amin = 150 if src == "wrist" else 40
-    pts = _blobs(img, color, amin)
+    """든 벽 점(1~2). ref 있으면 기준 자리 ±near 의 같은 색 점(물린 벽은 화면에서 거의 안 움직임).
+    seeds(ref 생성용 좌표) 있으면 그 근처. 둘 다 없으면(손목캠) HELD_BOX 안 큰 점."""
+    pts = _blobs(img, color, DET[src]["amin_wall"], src)
+    near = DET[src]["near"]
     anchors = [(p[0], p[1]) for p in ref["wall"]] if ref else (seeds or None)
     if anchors:
         out = []
         for rx, ry in anchors:
-            c = [q for q in pts if math.hypot(q[0] - rx, q[1] - ry) <= WALL_NEAR_PX]
+            c = [q for q in pts if math.hypot(q[0] - rx, q[1] - ry) <= near]
             if c:
                 out.append(min(c, key=lambda q: math.hypot(q[0] - rx, q[1] - ry)))
         return out
+    if src != "wrist":
+        return []
     x0, y0, x1, y1 = HELD_BOX
     pts = [q for q in pts if x0 <= q[0] <= x1 and y0 <= q[1] <= y1 and q[2] >= 300]
     pts.sort(key=lambda q: -q[2])
@@ -94,15 +112,18 @@ def wall_dots(img, color, ref=None, seeds=None, src="wrist"):
 
 
 def base_feats(img, exclude, src="wrist"):
-    """베이스 고정 특징 = 색점 중 든 벽 점이 아닌 것 전부(기둥 꼭대기 + 안착 벽 점, 같은 높이 평면). [(color,x,y,area)]"""
-    lo_a, hi_a = FEAT_AREA[src]
-    d = PD.detect(img, None)
+    """베이스 고정 특징 = 색점 중 든 벽 점이 아닌 것 전부(기둥 꼭대기 + 안착 벽 점). [(color,x,y,area)]"""
+    lo_a, hi_a = DET[src]["feat_area"]
+    if src == "wrist":
+        d = PD.detect(img, None)
+    else:
+        d = {c: _blobs(img, c, lo_a, src) for c in ("blue", "yellow", "red")}
     out = []
     for c, lst in d.items():
         for p in lst:
             if not (lo_a <= p[2] <= hi_a):
                 continue
-            if any(math.dist(p[:2], e[:2]) < 25 for e in exclude):
+            if any(math.dist(p[:2], e[:2]) < (25 if src == "wrist" else 12) for e in exclude):
                 continue
             out.append((c, p[0], p[1], p[2]))
     return out
@@ -114,6 +135,43 @@ def measure(img, color, ref=None, seeds=None, src="wrist"):
         return None, f"[{src}] 든 벽 점 0개(벽을 안 들었거나 기준 자리에 없음)"
     w = sorted(w, key=lambda q: (q[1], q[0]))
     return {"wall": [(q[0], q[1], q[2]) for q in w], "pillars": base_feats(img, w, src)}, None
+
+
+def set_expo(val):
+    """손목캠 노출(플리커 안전값만). color_lock 저장은 건드리지 않는다(관측자세 값은 그대로, 정렬 뒤 restore)."""
+    try:
+        import color_lock as CL
+        CL.expo(set=int(val)); time.sleep(0.9); return True
+    except Exception as e:
+        print("  ⚠ 노출 설정 실패:", e); return False
+
+
+def restore_expo():
+    try:
+        import color_lock as CL
+        st_ = json.load(open(CL.STORE)) if os.path.exists(CL.STORE) else {}
+        v = (st_.get("apply") or {}).get("set")
+        if v: CL.expo(set=int(v)); time.sleep(0.6)
+    except Exception as e:
+        print("  ⚠ 노출 복원 실패:", e)
+
+
+def pick_hover_expo(color, ref):
+    """★z440 노출 자동 선택(9/6 00:5x 라이브 실측: 417→파랑·노랑 둘 다 날아감 / 333·250·167→파랑만 / **83→파랑+노랑 둘 다**).
+    사다리 전부 시도해 **기준 특징과 매칭되는 수가 최대**인 노출을 고른다(첫 성공에서 멈추면 333 에서 파랑만 잡고 끝남)."""
+    best = None
+    for e in HOVER_EXPO_LADDER:
+        set_expo(e)
+        meas, why = measure(grab("wrist"), color, ref, None, "wrist")
+        nw = len(meas["wall"]) if meas else 0
+        nm = len(match_feats(ref["pillars"], meas["pillars"], DET["wrist"]["search"])[0]) if meas else 0
+        print(f"  호버 노출 {e}: 벽 점 {nw} 매칭 특징 {nm}")
+        key = (nm, nw)
+        if nw >= 1 and nm >= 2 and (best is None or key > best[0]):
+            best = (key, e)
+    if best is None:
+        return None
+    set_expo(best[1]); print(f"  → 호버 노출 {best[1]} 채택(매칭 {best[0][0]})"); return best[1]
 
 
 # ------------------------------------------------------------------ 기하
@@ -147,7 +205,8 @@ def wall_mid_ang(w):
     return ((x1 + x2) / 2, (y1 + y2) / 2), math.degrees(math.atan2(y2 - y1, x2 - x1))
 
 
-def match_feats(ref_p, now_p):
+def match_feats(ref_p, now_p, search=None):
+    search = search or DET["wrist"]["search"]
     src, dst, lab, used = [], [], [], set()
     for c, x, y, *_ in ref_p:
         best = None
@@ -155,7 +214,7 @@ def match_feats(ref_p, now_p):
             if c2 != c or j in used:
                 continue
             d = math.hypot(x2 - x, y2 - y)
-            if d <= SEARCH_PX and (best is None or d < best[0]):
+            if d <= search and (best is None or d < best[0]):
                 best = (d, j)
         if best is not None:
             used.add(best[1]); j = best[1]
@@ -165,22 +224,23 @@ def match_feats(ref_p, now_p):
 
 
 def jinv_for(src, z_tcp, rz_tcp):
-    """카메라별 (Jinv[mm/px, 로봇 프레임], rot_sign). 손목캠: 높이·rz 환산. 새카메라: probe 파일 그대로."""
+    """카메라별 (Jinv[mm/px, 로봇 프레임], rot_sign). 손목캠: 높이·rz 환산. 고정캠(newcam/side): probe 파일 그대로."""
     if src == "wrist":
         m = json.load(open(MAP)); d_h = D_OBS - (Z_OBS - z_tcp)
         if d_h < 60:
             raise RuntimeError(f"z{z_tcp:.0f}: 기둥 뎁스 {d_h:.0f}mm — 매핑 환산 불가")
         return _rot(HG.wrap_deg(rz_tcp - RZ_MAP)) @ (np.array(m["Jinv_mm_per_px"], float) * (d_h / D_OBS)), ROT_SIGN["wrist"]
-    if not os.path.exists(NEWCAM_MAP):
-        raise RuntimeError("새카메라 매핑 없음 — `hover_align.py probe newcam`")
-    m = json.load(open(NEWCAM_MAP))
+    f = SRC[src]["map"]
+    if not os.path.exists(f):
+        raise RuntimeError(f"{src} 매핑 없음 — `hover_align.py probe {src} <색> --wall x,y`")
+    m = json.load(open(f))
     if abs(z_tcp - m["z"]) > 5:
-        raise RuntimeError(f"새카메라 매핑은 z{m['z']:.0f} 용, 지금 z{z_tcp:.0f}")
+        raise RuntimeError(f"{src} 매핑은 z{m['z']:.0f} 용, 지금 z{z_tcp:.0f}")
     return np.array(m["Jinv_mm_per_px"], float), m.get("rot_sign", -1.0)
 
 
 def delta(ref, meas, z_tcp, rz_tcp, src="wrist"):
-    s_, d_, lab = match_feats(ref["pillars"], meas["pillars"])
+    s_, d_, lab = match_feats(ref["pillars"], meas["pillars"], DET[src]["search"])
     if len(s_) < 2:
         return None, f"[{src}] 베이스 특징 매칭 {len(s_)}개(2 필요) — 후보 {[(c, round(x), round(y)) for c, x, y, a in meas['pillars']]}"
     sim = similarity(s_, d_); s, th, tx, ty, rms = sim
@@ -255,7 +315,13 @@ def save_ref(color, src="wrist", seeds=None, img=None):
         print(f"  ⚠ [{src}] 든 벽 점 {len(meas['wall'])}개 — 위치만 정렬, 회전은 다른 카메라/랙 각으로")
     tcp = st()["tcp"]
     d = json.load(open(REF)) if os.path.exists(REF) else {}
-    d.setdefault(color, {})[src] = {"wall": meas["wall"], "pillars": meas["pillars"], "tcp": tcp, "z": tcp[2],
+    expo = None
+    if src == "wrist":
+        try:
+            expo = json.loads(UR.urlopen("http://127.0.0.1:8766/expo", timeout=3).read()).get("exposure")
+        except Exception:
+            pass
+    d.setdefault(color, {})[src] = {"wall": meas["wall"], "pillars": meas["pillars"], "tcp": tcp, "z": tcp[2], "expo": expo,
                                     "made": time.strftime("%Y-%m-%d %H:%M"), "note": "사용자 정렬 확인 상태(하강 직전)"}
     json.dump(d, open(REF, "w"), ensure_ascii=False, indent=1)
     print(f"✅ [{color}/{src}] 호버 기준 저장: 벽 점 {[(round(x), round(y)) for x, y, a in meas['wall']]} "
@@ -278,11 +344,11 @@ promote_ref.last = {}
 def available_sources(color):
     refs = load_ref(color) or {}
     out = []
-    for src in ("wrist", "newcam"):
+    for src in ("wrist", "newcam", "side"):
         if src not in refs:
             continue
-        if src == "newcam" and not os.path.exists(NEWCAM_MAP):
-            print("  ⚠ 새카메라 기준은 있으나 매핑 없음 → 손목캠만"); continue
+        if SRC[src]["map"] and not os.path.exists(SRC[src]["map"]):
+            print(f"  ⚠ {src} 기준은 있으나 매핑 없음(probe 필요) → 제외"); continue
         try:
             UR.urlopen(SRC[src]["url"].replace("/raw", "/health"), timeout=2).read()
         except Exception:
@@ -293,6 +359,8 @@ def available_sources(color):
 
 def check(color, srcs=None):
     """가용 카메라 전부 Δ. 반환 (combined, per_src, why). combined=None 이면 하강 금지."""
+    if not hasattr(check, "expo_done"):
+        check.expo_done = False
     srcs = srcs or available_sources(color)
     if not srcs:
         return None, {}, f"{color} 호버 기준 없음 (hover_align.py ref {color} [--src newcam --wall x,y])"
@@ -304,6 +372,10 @@ def check(color, srcs=None):
             return None, per, f"[{src}] 높이 z{z:.0f} ≠ 기준 z{ref['z']:.0f}"
         img = grab(src)
         meas, why = measure(img, color, ref, None, src)
+        if src == "wrist" and (not meas or len(meas["pillars"]) < 2) and not check.expo_done:
+            check.expo_done = True
+            if pick_hover_expo(color, ref) is not None:
+                meas, why = measure(grab(src), color, ref, None, src)
         if not meas:
             return None, per, why
         D, why = delta(ref, meas, z, rz, src)
@@ -314,10 +386,13 @@ def check(color, srcs=None):
     promote_ref.last[color] = last
     # 결합: XY 평균(불일치 게이트), rz 는 점 2개 카메라 우선
     xs = [D["dmm"] for D in per.values()]
-    if len(xs) == 2:
-        dd = math.dist(xs[0], xs[1]); da = abs(HG.wrap_deg(per["wrist"]["drz"] - per["newcam"]["drz"]))
-        if dd > COMBINE_TOL_MM or (not per["wrist"]["one_dot"] and not per["newcam"]["one_dot"] and da > COMBINE_TOL_DEG):
-            return None, per, f"카메라 불일치 XY {dd:.2f}mm rz {da:.2f}° — 매핑/기준 의심, 정지"
+    keys = list(per)
+    for i in range(len(keys)):
+        for j in range(i + 1, len(keys)):
+            A, B_ = per[keys[i]], per[keys[j]]
+            dd = math.dist(A["dmm"], B_["dmm"]); da = abs(HG.wrap_deg(A["drz"] - B_["drz"]))
+            if dd > COMBINE_TOL_MM or (not A["one_dot"] and not B_["one_dot"] and da > COMBINE_TOL_DEG):
+                return None, per, f"카메라 불일치({keys[i]}↔{keys[j]}) XY {dd:.2f}mm rz {da:.2f}° — 매핑/기준 의심, 정지"
     mx = sum(v[0] for v in xs) / len(xs); my = sum(v[1] for v in xs) / len(xs)
     two = [D for D in per.values() if not D["one_dot"]]
     drz = (sum(D["drz"] for D in two) / len(two)) if two else per[srcs[0]]["drz"]
@@ -333,6 +408,7 @@ def fmt(D):
 def align(color, dry=False, tol_mm=TOL_MM, tol_deg=TOL_DEG):
     """보정 루프. 수렴 True / dry False / 실패 예외(호출자가 정지·보고)."""
     prev = None
+    check.expo_done = False
     for it in range(MAX_ITER):
         C, per, why = check(color)
         for D in per.values():
@@ -354,14 +430,14 @@ def align(color, dry=False, tol_mm=TOL_MM, tol_deg=TOL_DEG):
     raise RuntimeError(f"호버 정렬 {MAX_ITER}회 내 미수렴")
 
 
-def probe_newcam(color, seeds, probe_mm=10.0):
-    """새카메라 매핑: 벽 든 채 z440 에서 X·Y ±probe 조그 → 벽 점 이동(px)/mm. rot_sign 은 +2° 조그로 실측."""
+def probe_fixed(src, color, seeds, probe_mm=10.0):
+    """고정카메라(newcam/side) 매핑: 벽 든 채 z440 에서 X·Y ±probe 조그 → 벽 점 이동(px)/mm. rot_sign 은 +2° 조그로 실측."""
     def wall_mid():
         pts = []
         for _ in range(3):
-            w = wall_dots(grab("newcam"), color, None, seeds, "newcam")
+            w = wall_dots(grab(src), color, None, seeds, src)
             if len(w) != len(seeds):
-                raise RuntimeError(f"새카메라 벽 점 {len(w)}개(기대 {len(seeds)})")
+                raise RuntimeError(f"{src} 벽 점 {len(w)}개(기대 {len(seeds)})")
             pts.append(np.array([p[:2] for p in sorted(w, key=lambda q: (q[1], q[0]))], float)); time.sleep(0.2)
         return np.mean(pts, axis=0)
     c0 = st()["tcp"]; P0 = wall_mid(); J = np.zeros((2, 2))
@@ -380,8 +456,8 @@ def probe_newcam(color, seeds, probe_mm=10.0):
     Jinv = np.linalg.inv(J)
     json.dump({"made": time.strftime("%Y-%m-%d %H:%M"), "tcp": c0, "z": c0[2], "J_px_per_mm": J.tolist(),
                "Jinv_mm_per_px": Jinv.tolist(), "rot_sign": rot_sign, "color": color, "seeds": seeds,
-               "scale_mm_per_px": float(1.0 / math.sqrt(abs(np.linalg.det(J))))}, open(NEWCAM_MAP, "w"), indent=1)
-    print(f"✅ 새카메라 매핑 저장 {NEWCAM_MAP}: 축척 {1.0 / math.sqrt(abs(np.linalg.det(J))):.4f}mm/px, 직교 {math.degrees(math.atan2(J[1,0],J[0,0]))-math.degrees(math.atan2(J[1,1],J[0,1]))+90:+.1f}°")
+               "scale_mm_per_px": float(1.0 / math.sqrt(abs(np.linalg.det(J)))), "src": src}, open(SRC[src]["map"], "w"), indent=1)
+    print(f"✅ {src} 매핑 저장 {SRC[src]['map']}: 축척 {1.0 / math.sqrt(abs(np.linalg.det(J))):.4f}mm/px, 직교 {math.degrees(math.atan2(J[1,0],J[0,0]))-math.degrees(math.atan2(J[1,1],J[0,1]))+90:+.1f}°")
 
 
 def _seeds(argv):
@@ -398,15 +474,20 @@ def main():
     if mode == "ref":
         save_ref(color, src, _seeds(sys.argv))
     elif mode == "check":
+        check.expo_done = False
         C, per, why = check(color)
         for D in per.values(): print(fmt(D))
         print(f"결합 XY ({C['dmm'][0]:+.2f},{C['dmm'][1]:+.2f}) rz {C['drz']:+.2f}° [{C['n_src']}캠]" if C else "❌ " + why)
     elif mode == "align":
         align(color, dry="--dry" in sys.argv)
-    elif mode == "probe":
-        seeds = _seeds(sys.argv)
-        if not seeds: print("--wall x,y[,x,y] 로 새카메라 화면의 든 벽 점 좌표를 주세요"); return
-        probe_newcam(color if color != "newcam" else "blue", seeds)
+    elif mode == "detect":
+        img = grab(src); w = wall_dots(img, color, None, _seeds(sys.argv), src); f = base_feats(img, w, src)
+        print(f"[{src}] 벽 점 {[(round(x), round(y), a) for x, y, a in w]}  베이스 특징 {[(c, round(x), round(y), a) for c, x, y, a in f]}")
+    elif mode == "probe":       # hover_align.py probe <newcam|side> <색> --wall x,y[,x,y]
+        seeds = _seeds(sys.argv); psrc = color; pcolor = sys.argv[3] if len(sys.argv) > 3 and not sys.argv[3].startswith("--") else "blue"
+        if psrc not in SRC or psrc == "wrist": print("probe 대상은 newcam 또는 side"); return
+        if not seeds: print("--wall x,y[,x,y] 로 그 카메라 화면의 든 벽 점 좌표를 주세요"); return
+        probe_fixed(psrc, pcolor, seeds)
     elif mode == "test":
         ref_img = cv2.imread(sys.argv[3]); now_img = cv2.imread(sys.argv[4])
         z = float(sys.argv[5]) if len(sys.argv) > 5 and not sys.argv[5].startswith("--") else 440.0
