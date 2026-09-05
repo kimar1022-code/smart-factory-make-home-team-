@@ -579,7 +579,10 @@ def run(color, seat=False, do_pick=True, target=None, align=True, len_gate=False
         if align:
             if HA.load_ref(color) is None:
                 raise RuntimeError(f"{color} 호버 기준 없음 — z+85 에서 사용자 정렬 확인 후 `hover_align.py ref {color}` (--no-align 으로만 우회)")
-            HA.align(color)                                # 미수렴·발산·측정 실패·카메라 불일치 = 예외 → 정지
+            try:
+                HA.align(color)                            # 미수렴·발산·측정 실패·카메라 불일치 = 예외 → 정지
+            finally:
+                HA.restore_expo()                          # z440 용 노출(83 등)을 관측 노출로 되돌림(다음 ① 측정 보호)
             cur = st()["tcp"]                              # ★정렬로 움직인 TCP 로 하강(옛 P 로 내리면 정렬이 되돌아감)
             P["x"], P["y"] = cur[0], cur[1]; tgt_rot = [180.0, 0.0, cur[5]]
             print(f"  정렬 후 하강 기준 x {cur[0]:.2f} y {cur[1]:.2f} rz {cur[5]:+.2f}")

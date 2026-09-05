@@ -24,6 +24,10 @@ if ! pgrep -f "pillar_view.p[y]" >/dev/null 2>&1; then
   nohup python3 "$HOME/bf2_console/tools/pillar_view.py" > "$HOME/bf2_console/logs/pillar_view.log" 2>&1 &
   echo "  기둥 검출 뷰 기동(:8773)"
 fi
+if ! pgrep -f "hover_view.p[y]" >/dev/null 2>&1; then
+  nohup python3 "$HOME/bf2_console/tools/hover_view.py" > "$HOME/bf2_console/logs/hover_view.log" 2>&1 &
+  echo "  호버 정렬 뷰 기동(:8775, 손목·새카메라·측면 3장)"
+fi
 if ! pgrep -f "rack_view.p[y]" >/dev/null 2>&1; then
   nohup python3 "$HOME/bf2_console/tools/rack_view.py" > "$HOME/bf2_console/logs/rack_view.log" 2>&1 &
   echo "  랙 관측 뷰 기동(:8774)"
