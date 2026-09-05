@@ -125,12 +125,111 @@ def grasp_measure(color="blue"):
         return None, f"벽 점 {len(pts)}개(2 필요)"
     (x1, y1, _), (x2, y2, _) = pts
     ang = math.degrees(math.atan2(x2 - x1, y2 - y1)); mid = ((x1 + x2) / 2, (y1 + y2) / 2)
-    scale = ref.get("wall_scale_mm_per_px") or 0.12
+    scale = ref.get("wall_scale_mm_per_px")
+    if not scale:
+        m, _w = held_wall_depth(color)
+        scale = m["mm_px"] if m else 0.12          # ★뎁스 실측 축척 우선, 없으면 옛 가상값(경고)
+        print(f"  파지 축척: 뎁스 {m['d_w']:.0f}mm → {scale:.4f}mm/px" if m else "  ⚠ 파지 축척: 뎁스 실측 불가 → 가상값 0.12mm/px")
     dx = mid[0] - ref["cam1_wall_mid"][0]; dy = mid[1] - ref["cam1_wall_mid"][1]
     dang = HG.wrap_deg(ang - ref["cam1_wall_ang_deg"])
     across = ACROSS_SIGN * dx * scale; along = ALONG_SIGN * dy * scale
     grip = HG.GripMeasure(center=(across, along), angle_deg=90.0 + dang, bottom_dz=0.0)
     return grip, {"dx_px": dx, "dy_px": dy, "dang": dang, "across_mm": across, "along_mm": along, "scale": scale}
+
+
+# ★뎁스 기반 벽 계측(9/5 밤, 사용자 설계 "잡으면 뎁스로 벽 길이를 재서 검산"). ⚠ 실기 미검증(로봇 꺼진 뒤 작성).
+#   fx 는 관측 매핑(z650 기둥꼭대기 뎁스 377mm ↔ 0.4135mm/px)에서 역산: fx = 377/0.4135 ≈ 912px.
+#   ① 든 벽(호버·랙 위): 손목캠 프레임에 벽 **전체가 안 들어온다**(9/5 파랑 z440 프레임: 흰 판이 위아래 프레임 밖,
+#      198mm ≈ 1650px > 720px). 그래서 길이는 못 재고, **뎁스 d_w → 실측 축척(d_w/fx)** 과 **벽 축 각(PCA)** 만 잰다.
+#      축척은 grasp_measure 의 가상값 0.12 를 대체하고, 축 각은 점 1개 벽(노랑·red_s)의 파지 회전 관측에 쓴다.
+#   ② 랙 관측자세(z556, 벽 전체 5점 보임): 색점 축 주변 뎁스 돌출 띠의 양 끝 = 물리적 양 끝 → 길이 검산.
+#      색점 두 끝 중간 ≠ 물리 중앙(~9mm) 문제를 색점과 독립인 방법으로 교차검증한다.
+FX_PX = 377.0 / 0.4134670689041742
+WALL_LEN_MM = {"blue": 198.0, "red": 198.0, "yellow": 125.0, "red_s": 125.0}
+LEN_GATE_MM = 4.0
+HELD_DEPTH_MAX = 250.0          # 이보다 먼 점은 든 벽이 아님(밑판·책상·랙)
+HELD_BOX_DEPTH = (600, 0, 1279, 719)
+
+
+def _depthgrid(x0, y0, x1, y1, nx, ny):
+    import numpy as np
+    g = json.loads(UR.urlopen(f"http://127.0.0.1:8766/depthgrid?x0={x0}&y0={y0}&x1={x1}&y1={y1}&nx={nx}&ny={ny}&r=2", timeout=8).read())
+    return np.array([(p["x"], p["y"], p["d"]) for p in g["pts"] if p["d"]], float)
+
+
+def held_wall_depth(color, nx=68, ny=72):
+    """든 벽 윗면 뎁스 → {"d_w", "mm_px", "ang_img", "span_px", "n"} 또는 (None, why). 길이는 프레임 클리핑으로 못 잰다."""
+    import numpy as np
+    x0, y0, x1, y1 = HELD_BOX_DEPTH
+    try:
+        pts = _depthgrid(x0, y0, x1, y1, nx, ny)
+    except Exception as e:
+        return None, f"depthgrid 실패: {e}"
+    pts = pts[(pts[:, 2] > 40) & (pts[:, 2] < HELD_DEPTH_MAX)]
+    if len(pts) < 30:
+        return None, f"든 벽 뎁스 점 {len(pts)}개(<30) — 벽을 안 들었거나 뎁스 무효"
+    d_w = float(np.median(pts[:, 2]))
+    near = pts[np.abs(pts[:, 2] - d_w) < 12.0]
+    c = near[:, :2].mean(0); X = near[:, :2] - c
+    w, v = np.linalg.eigh(X.T @ X); ax = v[:, int(np.argmax(w))]
+    proj = X @ ax
+    return {"d_w": d_w, "mm_px": d_w / FX_PX, "ang_img": math.degrees(math.atan2(ax[1], ax[0])),
+            "span_px": float(proj.max() - proj.min()), "center_px": (float(c[0]), float(c[1])), "n": int(len(near))}, None
+
+
+def rack_len_depth(color, ends, band_px=60, step_px=6.0):
+    """랙 관측자세에서 색점 양 끝(ends["p1"],["p2"]) 축 주변 뎁스 띠 → 물리적 길이·중심. RACK_MAP 축척 사용.
+    반환 {"len_mm","len_px","center_px","dot_len_px","d_top"} 또는 (None, why)."""
+    import numpy as np
+    (x1, y1), (x2, y2) = ends["p1"], ends["p2"]
+    ux, uy = x2 - x1, y2 - y1; L = math.hypot(ux, uy) or 1.0; ux, uy = ux / L, uy / L
+    ext = 0.35 * L                                        # 양 끝 바깥으로 35% 더 본다(점이 끝이 아닐 수 있음)
+    xs = [x1 - ux * ext, x2 + ux * ext]; ys = [y1 - uy * ext, y2 + uy * ext]
+    bx0 = int(max(0, min(xs) - band_px)); bx1 = int(min(1279, max(xs) + band_px))
+    by0 = int(max(0, min(ys) - band_px)); by1 = int(min(719, max(ys) + band_px))
+    # 격자 해상도: 축 방향 끝 판정 오차 = 한 칸이므로 x·y 모두 step_px(≈6px≈2mm) 로 깐다(점 수 ≤ ~4000)
+    nx = int(min(220, max(8, (bx1 - bx0) / step_px))); ny = int(min(220, max(8, (by1 - by0) / step_px)))
+    try:
+        pts = _depthgrid(bx0, by0, bx1, by1, nx, ny)
+    except Exception as e:
+        return None, f"depthgrid 실패: {e}"
+    pts = pts[(pts[:, 2] > 100) & (pts[:, 2] < 900)]
+    if len(pts) < 40:
+        return None, "뎁스 점 부족"
+    # 축 수직거리 band 안 점만, 뎁스 최빈 대역(벽 윗면 = 가장 가까운 큰 덩어리)
+    rel = pts[:, :2] - np.array([x1, y1]); along = rel @ np.array([ux, uy]); perp = rel @ np.array([-uy, ux])
+    m = np.abs(perp) < 25.0
+    if m.sum() < 20:
+        return None, "축 띠 안 뎁스 점 부족"
+    d = pts[m, 2]; hist, edges = np.histogram(d, bins=int(max(5, (d.max() - d.min()) / 3.0)))
+    d_top = 0.5 * (edges[np.argmax(hist)] + edges[np.argmax(hist) + 1])
+    top = m & (np.abs(pts[:, 2] - d_top) < 8.0)
+    a = along[top]
+    if len(a) < 10:
+        return None, "벽 윗면 대역 점 부족"
+    step = abs(ux) * (bx1 - bx0) / nx + abs(uy) * (by1 - by0) / ny     # 축 방향 격자 한 칸
+    a0, a1 = float(a.min()) - step / 2, float(a.max()) + step / 2
+    scale = float(np.hypot(*np.array(json.load(open(RACK_MAP))["Jinv_mm_per_px"])[:, 0]))
+    cx, cy = x1 + ux * (a0 + a1) / 2, y1 + uy * (a0 + a1) / 2
+    return {"len_px": a1 - a0, "len_mm": (a1 - a0) * scale, "center_px": (float(cx), float(cy)),
+            "dot_len_px": L, "d_top": float(d_top), "n": int(top.sum())}, None
+
+
+def rack_len_check(color, ends, strict=False):
+    """랙 길이 검산: 뎁스 물리 길이 vs 기지 길이, 뎁스 중심 vs 색점 중간. strict 면 게이트(예외)."""
+    m, why = rack_len_depth(color, ends)
+    if m is None:
+        print("  ⚠ 랙 뎁스 길이 측정 불가:", why)
+        if strict: raise RuntimeError("랙 뎁스 길이 측정 불가: " + why)
+        return None
+    L0 = WALL_LEN_MM[color]; dl = m["len_mm"] - L0
+    off = math.dist(m["center_px"], ends["mid"])
+    print(f"  랙 뎁스 검산[{color}]: 물리 길이 {m['len_mm']:.1f}mm (기지 {L0:.0f}, Δ{dl:+.1f}) · 뎁스중심↔색점중간 {off:.1f}px · 윗면 {m['d_top']:.0f}mm · 점 {m['n']}")
+    if abs(dl) > LEN_GATE_MM:
+        msg = f"랙 벽 길이 불일치 Δ{dl:+.1f}mm > {LEN_GATE_MM} — 끝 가림/겹침/다른 벽 의심"
+        if strict: raise RuntimeError(msg)
+        print("  ⚠", msg, "(보고만, --len-gate 로 게이트화)")
+    return m
 
 
 PICK_REF = "/home/ar/bf2_console/pick_ref_0905.json"
@@ -237,7 +336,7 @@ def plan(color, grip=None, holding=False):
             "anchor": a["color"], "anchor_made": a["made"]}
 
 
-def run(color, seat=False, do_pick=True, target=None):
+def run(color, seat=False, do_pick=True, target=None, align=True, len_gate=False):
     """target=(x,y,rz) 를 주면 관측자세 재측정 없이 그 목표로 간다(같은 종류 벽의 실제 안착에서 옮긴 값 등)."""
     pick, hover, g_open, g_close = pick_pose(color)
     grip = None
@@ -272,6 +371,7 @@ def run(color, seat=False, do_pick=True, target=None):
                 gx, gy = tg[0], tg[1]
                 e = rack_ends(color)
                 print(f"  랙 관측: 벽 중앙 ({e['mid'][0]:.0f},{e['mid'][1]:.0f}) 길이 {e['len_px']:.0f}px 각 {e['ang']:+.2f}° → 파지 XY ({gx:.1f},{gy:.1f}) 각차 {tg[2]:+.2f}°")
+                rack_len_check(color, e, strict=len_gate)   # ★뎁스로 물리 길이 검산(색점과 독립). 기본 보고, --len-gate 면 정지
             speed(SPD_MOVE); move([gx, gy, obs[2]] + list(pick[3:]), tag="파지 XY 위(관측 높이)")
             speed(SPD_DESC); move([gx, gy, pick[2] + 40] + list(pick[3:]), tag="픽 −40")
             speed(SPD_SEAT); move([gx, gy, pick[2]] + list(pick[3:]), tol=0.8, tag="픽 자세")
@@ -289,6 +389,8 @@ def run(color, seat=False, do_pick=True, target=None):
                     raise RuntimeError(f"빈 파지 의심(실측 {gr}, 닫힘 {g_close}, 손목캠 벽 점 없음) — 정지")
                 print(f"  그리퍼 값은 명령값과 같지만 손목캠에 벽 점 {len(held)}개 → 물고 있음으로 판정")
             speed(SPD_DESC); move(hover, tag="들어올림")
+            hd, _w = held_wall_depth(color)          # ★든 벽 뎁스(축척·축 각) — 길이는 클리핑으로 못 잼
+            if hd: print(f"  든 벽 뎁스 {hd['d_w']:.0f}mm · 축 {hd['ang_img']:+.2f}° · 폭 {hd['span_px']:.0f}px")
             g, info = grasp_measure(color)
             if target is None:
                 if g: print(f"  파지 편차: 가로 {info['across_mm']:+.2f}mm 길이 {info['along_mm']:+.2f}mm 각 {info['dang']:+.2f}°")
@@ -316,6 +418,18 @@ def run(color, seat=False, do_pick=True, target=None):
         zs = SEAT_Z[color]
         speed(SPD_SEAT)
         move([P["x"], P["y"], zs + 85] + tgt_rot, tag="기둥 꼭대기 위 z+85")
+        # ★호버 정렬(9/5 밤 신설, 사용자 설계): 같은 프레임에서 든 벽 점 ↔ 베이스 특징을 기준 관계에 맞춘다.
+        #   계산 목표(z650 관측 1회)의 잔차 = 파지 치우침 + 베이스 미세 이동 — 이걸 여기서 흡수. 기준 없으면 하강 금지.
+        if align:
+            import hover_align as HA
+            if HA.load_ref(color) is None:
+                raise RuntimeError(f"{color} 호버 기준 없음 — 사용자가 z+85 에서 정렬 확인 후 `hover_align.py ref {color}` 로 저장할 것 (--no-align 으로만 우회)")
+            HA.align(color)                                   # 미수렴·발산·측정 실패 = 예외 → 정지
+            cur = st()["tcp"]                                 # ★정렬로 움직인 TCP 를 하강 XY/rz 로(옛 P 로 내리면 정렬을 되돌린다)
+            P["x"], P["y"] = cur[0], cur[1]; tgt_rot = [180.0, 0.0, cur[5]]
+            print(f"  정렬 후 하강 기준 x {cur[0]:.2f} y {cur[1]:.2f} rz {cur[5]:+.2f}")
+        else:
+            print("  ⚠ 호버 정렬 생략(--no-align)")
         descend_monitored(color, P["x"], P["y"], tgt_rot, zs, g_close)
     except Exception as e:
         post("stop", {"dry_run": False})
@@ -491,8 +605,10 @@ def rack_ends(color, n=4, x_hint=None):
     mids = [((a[0][0] + a[1][0]) / 2, (a[0][1] + a[1][1]) / 2) for a in acc]
     L = [math.hypot(a[1][0] - a[0][0], a[1][1] - a[0][1]) for a in acc]
     ang = [math.degrees(math.atan2(a[1][0] - a[0][0], a[1][1] - a[0][1])) for a in acc]
+    p1 = (st_.mean(a[0][0] for a in acc), st_.mean(a[0][1] for a in acc))
+    p2 = (st_.mean(a[1][0] for a in acc), st_.mean(a[1][1] for a in acc))
     return {"mid": (st_.mean(m[0] for m in mids), st_.mean(m[1] for m in mids)),
-            "len_px": st_.mean(L), "ang": st_.mean(ang), "n_dots": acc[-1][2]}
+            "len_px": st_.mean(L), "ang": st_.mean(ang), "n_dots": acc[-1][2], "p1": p1, "p2": p2}
 
 
 def save_rack_obs():
@@ -707,7 +823,18 @@ if __name__ == "__main__":
         tgt = None
         if "--target" in sys.argv:
             i = sys.argv.index("--target"); tgt = (float(sys.argv[i + 1]), float(sys.argv[i + 2]), float(sys.argv[i + 3]))
-        run(color, seat="--seat" in sys.argv, do_pick="--no-pick" not in sys.argv, target=tgt)
+        run(color, seat="--seat" in sys.argv, do_pick="--no-pick" not in sys.argv, target=tgt,
+            align="--no-align" not in sys.argv, len_gate="--len-gate" in sys.argv)
+    elif mode == "held_depth":          # 벽 든 채(어느 높이든): 뎁스·축척·축 각
+        m, why = held_wall_depth(color)
+        print("❌ " + why if m is None else f"[{color}] 든 벽 뎁스 {m['d_w']:.0f}mm · {m['mm_px']:.4f}mm/px · 축 {m['ang_img']:+.2f}° · 폭 {m['span_px']:.0f}px · 중심 ({m['center_px'][0]:.0f},{m['center_px'][1]:.0f}) · 점 {m['n']}")
+    elif mode == "rack_len":            # 랙 관측자세에서: 색점 양끝 + 뎁스 물리 길이 검산
+        cal = json.load(open(RACK_CALIB)).get(color) if os.path.exists(RACK_CALIB) else None
+        e = rack_ends(color, x_hint=cal["Pc0"][0] if cal else None)
+        if not e: print("❌ 색점 양끝 검출 실패")
+        else:
+            print(f"[{color}] 색점: 중앙 ({e['mid'][0]:.0f},{e['mid'][1]:.0f}) 길이 {e['len_px']:.0f}px 각 {e['ang']:+.2f}°")
+            rack_len_check(color, e, strict=False)
     elif mode == "release":
         release_and_retreat(color)
     elif mode == "nudge":
