@@ -21,6 +21,7 @@ import numpy as np
 
 sys.path.insert(0, "/home/ar/bf2_console/tools")
 import base_depth_corner as B
+import pillar_dots as PD
 
 PERCH_MM = 40.0        # 기둥 꼭대기보다 이만큼 위 = 얹힘(안착 0 vs 얹힘 80 의 중간)
 SEAT_TOL_MM = 15.0     # 안착 허용(평면 요철·뎁스 잡음)
@@ -56,23 +57,31 @@ def verify(img=None, grid=None, perch_mm=PERCH_MM):
     # detect_rect 반환: {"box": minAreaRect 4점, "corners": 서브픽셀 정제 4점(None 가능), ...}
     rect = None
     if m:
-        cs = [c for c in (m.get("corners") or []) if c]
-        rect = cs if len(cs) == 4 else (m.get("box") or None)
+        rect = PD.plate_rect(m)
+    # ★9/5: 기둥 꼭대기는 흰 점이 아니라 색점(파랑2·노랑1·빨강1) → pillar_dots 로 잡는다(벽이 꽂혀도 동작)
     try:
-        d = B.base_dots(img, rect)
-        whites = sorted(d.get("white") or [], key=lambda p: -p[2])[:4]
+        import pillar_dots as PDm
+        pts4, why4 = PDm.four_corners(img, PDm.plate_rect(m) if m else rect)
     except Exception as e:
-        return {"state": "unknown", "why": f"기둥점 검출 실패 {e}"}
-    if len(whites) < 2:
-        return {"state": "unknown", "why": f"기둥 꼭대기 흰 점 {len(whites)}개(2 이상 필요)"}
-
-    pill_d = []
-    for p in whites:
-        pill_d += _depth_near(grid, p[0], p[1])
-    if len(pill_d) < 4:
-        return {"state": "unknown", "why": f"기둥 꼭대기 뎁스 표본 {len(pill_d)}개"}
-    d_pillar = st.median(pill_d)
-
+        pts4, why4 = None, str(e)
+    if not pts4 or len(pts4) < 2:
+        return {"state": "unknown", "why": f"기둥 색점 검출 실패({why4})"}
+    whites = [(p[0], p[1], p[2]) for p in pts4]
+    fit_k = len(whites)
+    # ★9/5 기준면 정정: 기둥 꼭대기 색점 주변 뎁스는 기둥이 10×10mm 라 격자점이 책상(133mm 아래)에 떨어져
+    #   기준이 책상이 되어 버렸다(전 영역이 52~133mm '위'로 판정). → 밑판 윗면(넓고 평평) 뎁스 중앙값에서
+    #   기둥 높이 80mm 를 빼 '기둥 꼭대기 평면'을 만든다. 안착 벽 윗변 = 그 평면, 얹힌 벽 = 80mm 위.
+    import cv2 as _cv
+    poly0 = np.array(rect, np.float32)
+    ctr = poly0.mean(0)
+    inner = ctr + (poly0 - ctr) * 0.55            # 밑판 중앙 55% 영역(가장자리의 벽 윗변 배제)
+    plate_d = [q["d"] for q in grid["pts"] if q.get("d") and q["d"] > 0
+               and _cv.pointPolygonTest(inner, (float(q["x"]), float(q["y"])), False) >= 0]
+    if len(plate_d) < 8:
+        return {"state": "unknown", "why": f"밑판 뎁스 표본 {len(plate_d)}개"}
+    d_plate = st.median(plate_d)
+    d_pillar = d_plate - 80.0                     # 기둥 꼭대기 평면(카메라에 80mm 더 가까움)
+    n_drop = 0
     # 2) 판정 영역 = 밑판 사각형(있으면) 안쪽, 그리퍼 마진 제외
     poly = np.array(rect, np.float32) if rect is not None else None
     ymax = H * (1.0 - GRIP_MARGIN)
@@ -91,8 +100,10 @@ def verify(img=None, grid=None, perch_mm=PERCH_MM):
             above.append((q["x"], q["y"], h))
 
     n = len(above)
-    res = {"d_pillar_mm": round(d_pillar, 1), "n_inside": inside, "n_above": n,
-           "pillars": len(whites), "rect": rect is not None}
+    res = {"d_pillar_mm": round(d_pillar, 1), "d_plate_mm": round(d_plate, 1), "n_inside": inside, "n_above": n,
+           "pillars": len(whites), "rect": rect is not None,
+           "pillar_fit": (f"모양검증 {fit_k}점" if fit_k else "모양검증 실패(면적순 대체)"),
+           "depth_outlier_drop": n_drop}
     if n >= MIN_PTS:
         hs = [a[2] for a in above]
         res.update(state="perched", above_mm=round(st.median(hs), 1),
