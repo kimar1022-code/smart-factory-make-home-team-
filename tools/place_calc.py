@@ -127,9 +127,7 @@ def grasp_measure(color="blue", rack_dang=None):
     n_ref = len(ref.get("cam1_wall_pd") or [])
     if len(pts) < 1:
         return None, "든 벽 점 0개"
-    scale = ref.get("wall_scale_mm_per_px") or wall_scale()
-    if not scale:
-        scale = 0.12; print("  ⚠ 파지 축척: 캘리브 없음 → 가상값 0.12mm/px (`--grasp-teach` 파랑 1회로 확정)")
+    scale = ref.get("wall_scale_mm_per_px") or wall_scale(color)
     if len(pts) >= 2 and n_ref >= 2:
         (x1, y1, _), (x2, y2, _) = pts[0], pts[-1]
         ang = math.degrees(math.atan2(x2 - x1, y2 - y1)); mid = ((x1 + x2) / 2, (y1 + y2) / 2)
@@ -146,18 +144,22 @@ def grasp_measure(color="blue", rack_dang=None):
 
 
 GRASP_GATE_MM, GRASP_GATE_DEG = 1.0, 0.3     # 설계 2단계 게이트(9/4 v2.1). 넘으면 정지·보고, 자동 재파지 금지
-WALL_SCALE_FILE = "/home/ar/bf2_console/wall_scale.json"   # 든 벽 평면 축척(mm/px) — 카메라·그리퍼 기하 상수라 벽 무관 1개
+HELD_TOP_DEPTH_OFFSET = 273.0   # 든 벽 윗변 뎁스(mm) = SEAT_Z − 273  (아래 유도)
 
 
-def wall_scale():
-    """든 벽 평면 축척. ★뎁스를 쓰지 않는다(검은 랙·검은 벽에서 D435 뎁스 불안정 — 사용자 지적).
-    파랑(점 2개)을 든 채 점 간격 px ↔ 랙 관측에서 잰 같은 점 간격 mm 로 1회 캘리브(`run blue --grasp-teach` 가 자동 저장)."""
-    if os.path.exists(WALL_SCALE_FILE):
-        return json.load(open(WALL_SCALE_FILE)).get("mm_per_px")
-    return None
+def wall_scale(color):
+    """든 벽 윗변 평면의 손목캠 축척(mm/px) — **뎁스도, 점 간격 가정도 안 쓴다**(9/6 새벽 검증).
+    유도: 관측자세 z650 에서 기둥꼭대기 뎁스 377mm(실측) → TCP z 에서 기둥꼭대기 뎁스 = 377−(650−z).
+          안착 z_seat 에서 벽 윗변 = 기둥 꼭대기이므로 TCP z 에서 벽 윗변은 기둥 꼭대기보다 (z−z_seat) 위
+          → 벽 윗변 뎁스 = 377−650+z−(z−z_seat) = z_seat−273 (z 무관 상수). 파랑 82 · 노랑 81 · 빨강 80 · red_s 78mm.
+          축척 = 뎁스/fx, fx = 377/0.4135 = 912px.
+    교차검증(9/6): 파랑 든 점 간격 425.9px × 0.0899 = 38.3mm ↔ 랙 관측 실측 인접 간격 38.8mm (차 1.3%).
+          (랙 실측 5점 간격 38.8/53.5/63.1/29.7mm → '균등 간격' 가정은 틀렸음, 폐기)
+    ★D435 최소 거리(1280×720 에서 ~280mm)보다 훨씬 가까워 든 벽 뎁스는 원리적으로 안 나온다 — 사용자 관찰과 일치."""
+    return (SEAT_Z[color] - HELD_TOP_DEPTH_OFFSET) / FX_PX
 
 
-def save_grasp_sig_now(color, grip_cmd, gr, gap_mm=None):
+def save_grasp_sig_now(color, grip_cmd, gr):
     """★든 상태에서 지금 손목캠 벽 점을 공칭 파지 서명으로 저장(그리퍼 조작 없음). gap_mm 주면 축척도 캘리브."""
     import cv2, numpy as np
     lo, hi = WALL_DOT_HSV[color]
@@ -186,11 +188,6 @@ def save_grasp_sig_now(color, grip_cmd, gr, gap_mm=None):
         "note": "랙 중앙 파지(rack_calib) 상태에서 --grasp-teach 로 저장"}
     json.dump(ref, open(GRASP_REF, "w"), ensure_ascii=False, indent=1)
     print(f"  ✅ [{color}] 파지 서명 저장({len(pts)}점): 각 {ang:+.2f}° 간격 {L:.0f}px 중점 ({mid[0]:.0f},{mid[1]:.0f})")
-    if gap_mm and L > 50:
-        sc = gap_mm / L
-        json.dump({"mm_per_px": sc, "made": time.strftime("%Y-%m-%d %H:%M"), "color": color, "gap_mm": gap_mm, "gap_px": L,
-                   "note": "랙 관측 인접 점 간격(mm) ÷ 든 벽 점 간격(px). 뎁스 미사용"}, open(WALL_SCALE_FILE, "w"), indent=1)
-        print(f"  ✅ 든 벽 축척 캘리브: {gap_mm:.1f}mm / {L:.0f}px = {sc:.4f}mm/px (뎁스 미사용)")
     return pts
 
 
@@ -471,8 +468,6 @@ def run(color, seat=False, do_pick=True, target=None, align=True, len_gate=False
             e = rack_ends(color, x_hint=json.load(open(RACK_CALIB))[color]["Pc0"][0])
             print(f"  랙: 벽 중앙 ({e['mid'][0]:.0f},{e['mid'][1]:.0f}) 길이 {e['len_px']:.0f}px 각 {e['ang']:+.2f}° → 파지 XY ({gx:.1f},{gy:.1f}) 각차 {rack_dang:+.2f}°")
             rack_len_check(color, e, strict=len_gate)     # 뎁스 물리 길이 검산(색점과 독립, 보고만 — 검은 랙에서 뎁스 불안정)
-            rack_scale = float(np.hypot(*np.array(json.load(open(RACK_MAP))["Jinv_mm_per_px"])[:, 0]))
-            gap_mm = e["len_px"] * rack_scale / max(1, e["n_dots"] - 1) if e.get("n_dots", 0) >= 2 else None   # 인접 점 간격(균등 가정)
             rot = [180.0, 0.0, 180.0]                     # ★랙 하강은 항상 rz 180(9/5: −177 잔류 → 3° 물림·동결)
             speed(SPD_MOVE); move([gx, gy, obs[2]] + rot, tag="파지 XY 위(관측 높이)")
             speed(SPD_DESC); move([gx, gy, pick[2] + 40] + rot, tag="픽 −40")
@@ -493,7 +488,7 @@ def run(color, seat=False, do_pick=True, target=None, align=True, len_gate=False
             if hd: print(f"  (참고) 든 벽 뎁스 {hd['d_w']:.0f}mm · 축 {hd['ang_img']:+.2f}° · 폭 {hd['span_px']:.0f}px")
             if grasp_teach:
                 # ★서명 티칭: 랙 중앙 파지가 곧 공칭 파지. 지금 든 점을 서명으로 저장(+파랑이면 축척 캘리브), 게이트 생략
-                save_grasp_sig_now(color, g_close, grip_read(), gap_mm=gap_mm if len(held_wall_dots(color)) >= 2 else None)
+                save_grasp_sig_now(color, g_close, grip_read())
                 grasp_gate = False
             g, info = grasp_measure(color, rack_dang=rack_dang)
             if g is None:
