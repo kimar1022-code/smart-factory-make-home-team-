@@ -47,7 +47,9 @@ SRC = {"wrist":  {"url": "http://127.0.0.1:8766/raw", "moving": "base", "map": N
        "side":   {"url": "http://127.0.0.1:8771/raw", "moving": "wall", "map": "/home/ar/bf2_console/cam2robot_side.json"}}
 ROT_SIGN = {"wrist": +1.0}                      # 고정캠은 probe 가 rot_sign 을 파일에 저장
 # 소스별 검출 파라미터(9/6 새벽 라이브 프레임 실측): 새카메라 파랑 V≈100(손목캠 범위 V140 미달), 측면캠 640×480 점 면적 29~118
-DET = {"wrist":  {"amin_wall": 150, "feat_area": (60, 1400), "near": 80.0, "search": 140.0, "ranges": None},
+# 9/6 19:1x: 빨강 랩어라운드 수정 후 근거리(z440~470)에서 기둥 점이 2300px² 까지 커져 옛 상한 1400 에 걸려 사라짐 → 3200 으로.
+#   (newcam 상한은 fixed_cam_seeds 가 '든 벽 점 = 상한 초과' 로 쓰므로 그대로 둔다)
+DET = {"wrist":  {"amin_wall": 150, "feat_area": (60, 3200), "near": 80.0, "search": 140.0, "ranges": None},
        "newcam": {"amin_wall": 40,  "feat_area": (20, 1400), "near": 60.0, "search": 120.0,
                   "ranges": {"blue": ((95, 150, 70), (118, 255, 255)), "yellow": ((15, 80, 110), (40, 255, 255)),
                              "red": [((0, 100, 80), (10, 255, 255)), ((160, 100, 80), (180, 255, 255))]},

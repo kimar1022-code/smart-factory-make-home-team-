@@ -39,9 +39,12 @@ RANGES = {
     #   '어둡지만 완전포화(S235+)' 2차 밴드로 그늘 점만 살린다. 어두운 기둥 몸통은 S200~230 이라 안 걸림(실측 오검출 0).
     "blue_dark": ((96, 235, 25), (116, 255, 150)),
     "yellow": ((15, 90, 110), (38, 255, 255)),
-    "red":    ((135, 100, 55), (175, 255, 210)),  # H144~166 분홍빛 빨강(통상 범위 밖)
+    # ★9/6 19:1x 실측: 빨강 점 픽셀 H 170~175 로 상한 175 에 걸쳐 점의 절반이 잘리고 2~5조각으로 쪼개짐
+    #   → 중심이 σy 13px 로 튀고 10프레임 중 3회 미검출. 빨강은 H 가 180→0 으로 감기므로 두 구간 합집합으로.
+    #   실측(z470 같은 프레임): 현재 200+115 조각 → 합집합 2324 하나 (파랑 1473·1318, 노랑 1936 과 같은 수준)
+    "red":    [((135, 100, 55), (179, 255, 255)), ((0, 100, 55), (6, 255, 255))],
 }
-AREA_MIN, AREA_MAX = 40, 1800
+AREA_MIN, AREA_MAX = 40, 3200   # 9/6 19:1x: 빨강 랩어라운드 수정으로 점이 온전해지자 근거리(z470)에서 2324px² → 옛 상한 1800 에 걸려 사라짐. 같은 프레임 노랑 1936·파랑 1473
 CORNER_R_PX = 90          # 밑판 꼭짓점에서 이 반경 안의 색점만 기둥 후보로 인정
 FIT_REJECT_MM = 4.0       # 모델(200×130) 맞춤 오차가 이보다 크면 기둥 조합이 아니라고 본다
 ASPECT = (0.5, 2.0)
@@ -72,7 +75,20 @@ def detect(img, rect=None):
     밑판 위의 색 자국·반사를 배제한다."""
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    out = {k: _blobs(hsv, gray, lo, hi) for k, (lo, hi) in RANGES.items() if k != "blue_dark"}
+    def _multi(r):                                   # 색당 (lo,hi) 하나 또는 [(lo,hi), ...] 합집합
+        rs = r if isinstance(r, list) else [r]
+        acc = []
+        for lo, hi in rs:
+            acc += _blobs(hsv, gray, lo, hi)
+        if len(rs) == 1:
+            return acc
+        acc.sort(key=lambda p: -p[2])                # 랩어라운드 두 구간이 같은 점을 각각 잡으면 근접 중복 제거
+        keep = []
+        for p in acc:
+            if all(math.hypot(p[0] - q[0], p[1] - q[1]) > 12 for q in keep):
+                keep.append(p)
+        return keep
+    out = {k: _multi(r) for k, r in RANGES.items() if k != "blue_dark"}
     # ★그늘 파랑점 병합(중복은 근접 제거)
     for p in _blobs(hsv, gray, *RANGES["blue_dark"]):
         if all(math.hypot(p[0] - q[0], p[1] - q[1]) > 12 for q in out["blue"]):
