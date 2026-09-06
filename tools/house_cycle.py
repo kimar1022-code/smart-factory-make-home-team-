@@ -78,7 +78,8 @@ RUN4_ORDER = ("blue", "yellow", "red", "red_s") # ④4벽 연속 순서
 ALIGN_SRCS = {"blue": ("newcam",)}                # 색별 정렬 카메라(없으면 가용 전부)
 # 14:33 실기: 랙 비틀림(죠 안 +0.99°)을 새카메라 1점이 못 봐 사용자 2.35mm/0.32° 조그. 손목캠 벽 2점이 죠 안 회전을 보지만
 #   손목캠 기준(13:47)이 삽입 후 밀린 벽 각으로 찍혀 rz +0.5° 편향 → 우선 "measure"(측정·성공 시 승격만) 로 한 사이클 재기준 후 "rz" 로 승격.
-ALIGN_ROLES = {"blue": {"newcam": "xy", "wrist": "rz"}}
+RZ_MEASURE_WARN = 0.6                            # 정렬 중 손목캠이 재는 벽 회전이 이만큼 넘으면 경고(죠 안에서 벽이 돌아감 = 재파지 신호. rz 를 억지로 돌려 맞추지 않는다)
+ALIGN_ROLES = {"blue": {"newcam": "xy", "wrist": "measure"}}   # ★rz 고정 모드: rz 담당 없음 → 정렬은 XY 만, rz 는 운반의 절대 명령값 그대로
 # 정렬 수렴 후 사용자 조그 4회(14:33·14:51·15:31·15:57): dx −0.89/−0.04/−1.00/−0.99, dy −2.18/−1.02/−2.03/−2.50, drz +0.32/+0.88/+0.93/+0.65
 #   → 부호가 전부 같고 크기도 비슷 → 사용자 지시("일률적이면 보정값") 대로 정렬 뒤 고정 보정(로봇 프레임, rz≈180 기준). nudge_log 로 잔차 계속 감시.
 POST_ALIGN_OFFSET = {"blue": (0.0, 0.0, 0.0)}   # 15:57 사용자 조그 자리(=이 보정값 자리)에서 채널 입구 막힘 → 보정 보류(0). 카메라 자리로 하강 시험 후 결정   # 15:35 재기준(사용자 자리·이 파지) 후 손목캠 rz 담당. 조그 3회 모두 손목캠 rz 방향 일치(+1.09/+0.99/+1.26 vs 사용자 +0.32/+0.88/+0.93)
@@ -165,6 +166,20 @@ def _move_rel_guard(dx, dy, drz, tol=0.3, timeout=40):
     tgt = [c[0] + dx, c[1] + dy, c[2], c[3], c[4], HG.wrap_deg(c[5] + drz)]
     return move(tgt, tol=tol, timeout=timeout, tag=f"상대({dx:+.1f},{dy:+.1f},{drz:+.1f}°)")
 HA.move_rel = _move_rel_guard
+
+
+def rz_measure_check(color):
+    """rz 고정 모드에서 손목캠이 재는 벽 회전만 보고. 크면 '죠 안에서 벽이 돌아감' → 재파지 권고(rz 를 돌려 맞추지 않는다)."""
+    if (ALIGN_ROLES.get(color) or {}).get("wrist") != "measure":
+        return
+    try:
+        _, per, _ = HA.check(color)
+        D = per.get("wrist")
+        if D and not D.get("one_dot"):
+            mark = "  ⚠ 재파지 권고" if abs(D["drz"]) > RZ_MEASURE_WARN else ""
+            log(f"  (rz 참고) 손목캠이 보는 벽 회전 {D['drz']:+.2f}° — rz 는 절대값 유지{mark}")
+    except Exception as ex:
+        log(f"  (rz 참고 실패: {ex})")
 
 
 def post_align_offset(color):
@@ -436,6 +451,7 @@ def stage_carry_hover(color, T):
             log(f"  정렬 카메라: {srcs} 역할 {roles or 'both'}")
         HA.align(color, srcs=srcs, roles=roles)                # 부품(지정 카메라·역할, 수렴/발산/불일치 게이트)
         post_align_offset(color)
+        rz_measure_check(color)
         A["done"] = True
     finally:
         HA.restore_expo()
