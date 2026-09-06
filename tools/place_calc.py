@@ -90,9 +90,14 @@ def load_grasp_ref(color):
     if not os.path.exists(GRASP_REF):
         return None
     ref = json.load(open(GRASP_REF))
+    # ★9/6 버그: 최상위(9/5 17:04 파랑, taught 픽 기준)를 by_color 보다 먼저 돌려줘서 --grasp-teach 로 다시 쓴 by_color.blue 가
+    #   무시됐다(저장 직후 "길이 −1.93mm" = 옛 중점 437.4 ↔ 새 458.9 의 21.5px). 저장은 항상 by_color 에 하므로 by_color 우선.
+    bc = (ref.get("by_color") or {}).get(color)
+    if bc and "cam1_wall_mid" in bc:
+        return bc
     if ref.get("color") == color and "cam1_wall_mid" in ref:
         return ref
-    return (ref.get("by_color") or {}).get(color)
+    return None
 
 
 def wall_dots_cam1(ref):
@@ -492,7 +497,7 @@ def _grip_ok(gr, g_close, color):
     return False, f"그리퍼 {gr}, 닫힘 {g_close}, 벽 점 0"
 
 
-def run(color, seat=False, do_pick=True, target=None, align=True, len_gate=False, grasp_gate=True, grasp_teach=False):
+def run(color, seat=False, do_pick=True, target=None, align=True, len_gate=False, grasp_gate=True, grasp_teach=False, align_stop=False):
     """★설계 4단계 고정 순서(9/5 밤, 사용자 설계):
       ① 빈 손 베이스 재확인(관측자세)  — 매 사이클. 4점 안 보이면 카메라를 옮겨 찾는다(find_base_4pts)
       ② 랙 재관측 → 벽 중앙 → 하강 파지 → 파지 판정  — 매 픽. 양끝 안 보이면 카메라를 옮겨 찾는다(rack_find)
@@ -569,8 +574,8 @@ def run(color, seat=False, do_pick=True, target=None, align=True, len_gate=False
         move([P["x"], P["y"], SAFE_Z] + tgt_rot, tag="목표 위 SAFE(rz 정렬)")
         print(f"  (참고) 운반 후 그리퍼 {grip_read()}")                 # 재판정 없음(사용자 지시)
         speed(SPD_DESC); move([P["x"], P["y"], HOVER_Z] + tgt_rot, tag="목표 호버 z478")
-        if not seat:
-            print("호버 정지. --seat 를 주면 z+85 에서 호버 정렬 후 하강."); return
+        if not seat and not align_stop:
+            print("호버 정지. --seat 를 주면 z+85 에서 호버 정렬 후 하강, --align-stop 이면 정렬까지만."); return
         # ---------- ④ 호버 정렬 → 하강
         zs = SEAT_Z[color]
         speed(SPD_SEAT); move([P["x"], P["y"], zs + 85] + tgt_rot, tag="기둥 꼭대기 위 z+85")
@@ -588,6 +593,8 @@ def run(color, seat=False, do_pick=True, target=None, align=True, len_gate=False
             print(f"  정렬 후 하강 기준 x {cur[0]:.2f} y {cur[1]:.2f} rz {cur[5]:+.2f}")
         else:
             print("  ⚠ 호버 정렬 생략(--no-align)")
+        if align_stop:
+            print("★ z440 정렬 완료 — 하강은 사용자 허락 대기(수동 하강). 로봇 정지."); return
         descend_monitored(color, P["x"], P["y"], tgt_rot, zs, g_close)
         if align:
             HA.promote_ref(color)                          # ★안착 성공 사이클의 정렬 상태를 다음 기준으로
@@ -1069,7 +1076,7 @@ if __name__ == "__main__":
             i = sys.argv.index("--target"); tgt = (float(sys.argv[i + 1]), float(sys.argv[i + 2]), float(sys.argv[i + 3]))
         run(color, seat="--seat" in sys.argv, do_pick="--no-pick" not in sys.argv, target=tgt,
             align="--no-align" not in sys.argv, len_gate="--len-gate" in sys.argv, grasp_gate="--no-grasp-gate" not in sys.argv,
-            grasp_teach="--grasp-teach" in sys.argv)
+            grasp_teach="--grasp-teach" in sys.argv, align_stop="--align-stop" in sys.argv)
     elif mode == "held_depth":          # 벽 든 채(어느 높이든): 뎁스·축척·축 각
         m, why = held_wall_depth(color)
         print("❌ " + why if m is None else f"[{color}] 든 벽 뎁스 {m['d_w']:.0f}mm · {m['mm_px']:.4f}mm/px · 축 {m['ang_img']:+.2f}° · 폭 {m['span_px']:.0f}px · 중심 ({m['center_px'][0]:.0f},{m['center_px'][1]:.0f}) · 점 {m['n']}")
