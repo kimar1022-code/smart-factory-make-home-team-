@@ -159,8 +159,8 @@ def restore_expo():
     try:
         import color_lock as CL
         st_ = json.load(open(CL.STORE)) if os.path.exists(CL.STORE) else {}
-        v = (st_.get("apply") or {}).get("set")
-        if v: CL.expo(set=int(v)); time.sleep(0.6)
+        ap = st_.get("apply") or {}
+        if ap.get("set"): CL.expo(set=int(ap["set"]), **({"gain": int(ap["gain"])} if ap.get("gain") else {})); time.sleep(0.6)
     except Exception as e:
         print("  ⚠ 노출 복원 실패:", e)
 
