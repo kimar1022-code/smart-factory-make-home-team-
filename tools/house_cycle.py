@@ -568,25 +568,30 @@ def seat_check(color=None):
         return seat
     try:
         pr = jload(os.path.join(STATE, "pose_refs", f"{color}.json")) or {}
-        dots = (((pr.get("seat") or {}).get("cams") or {}).get("newcam") or {}).get("dots") or {}
+        cams = ((pr.get("seat") or {}).get("cams") or {})
         wall_c = "red" if color == "red_s" else color
+        # 20:0x: 노랑 자리에선 새카메라가 기둥을 못 봄 → 기준이 있는 카메라를 쓴다(newcam 우선, 없으면 wrist).
+        src = next((k for k in ("newcam", "wrist") if [p for c, lst in ((cams.get(k) or {}).get("dots") or {}).items()
+                                                       if c != wall_c for p in (lst or []) if len(p) >= 2]), None)
+        if not src:
+            seat["why"] = str(seat.get("why")) + " | 안착 기준(newcam/wrist) 없음"; return seat
+        dots = (cams.get(src) or {}).get("dots") or {}
         refs = [(c, p[0], p[1]) for c, lst in dots.items() if c != wall_c for p in (lst or []) if len(p) >= 2]
-        if not refs:
-            seat["why"] = str(seat.get("why")) + " | 새카메라 안착 기준 없음"; return seat
-        img = HA.grab("newcam")
+        img = HA.grab(src)
         res = []
         for c, rx, ry in refs:
-            now = HA._blobs(img, c, 20, "newcam")
+            now = HA.base_feats(img, [], src) if src == "wrist" else HA._blobs(img, c, 20, src)
+            now = [(x, y, a) for cc, x, y, a in now if cc == c] if src == "wrist" else now
             cand = [q for q in now if math.hypot(q[0] - rx, q[1] - ry) <= 60]
             if cand:
                 q = min(cand, key=lambda q: math.hypot(q[0] - rx, q[1] - ry)); res.append((c, round(rx), round(ry), round(q[0]), round(q[1]), math.hypot(q[0] - rx, q[1] - ry)))
-        if not res:
-            seat["why"] = str(seat.get("why")) + f" | 새카메라: 기준 기둥 {[(c, round(x), round(y)) for c, x, y in refs]} 근처(60px)에 점 없음"; return seat
+        if len(res) < max(1, min(2, len(refs))):
+            seat["why"] = str(seat.get("why")) + f" | {src}: 기준 기둥 {[(c, round(x), round(y)) for c, x, y in refs]} 근처(60px)에 점 부족({len(res)})"; return seat
         worst = max(r[5] for r in res)
         desc = " ".join(f"{c}({rx},{ry})→({x},{y}) {d:.1f}px" for c, rx, ry, x, y, d in res)
         if worst <= SEAT_NEWCAM_TOL_PX:
-            return {"state": "seated_newcam", "why": f"새카메라 기둥 점이 안착 기준 자리와 일치: {desc} (허용 {SEAT_NEWCAM_TOL_PX}px)", "px": worst}
-        return {"state": "unknown", "why": f"새카메라 기둥 점이 안착 기준에서 {worst:.1f}px (> {SEAT_NEWCAM_TOL_PX}): {desc}", "px": worst}
+            return {"state": f"seated_{src}", "why": f"{src} 기둥 점 {len(res)}개가 안착 기준 자리와 일치: {desc} (허용 {SEAT_NEWCAM_TOL_PX}px)", "px": worst}
+        return {"state": "unknown", "why": f"{src} 기둥 점이 안착 기준에서 {worst:.1f}px (> {SEAT_NEWCAM_TOL_PX}): {desc}", "px": worst}
     except Exception as ex:
         seat["why"] = str(seat.get("why")) + f" | 새카메라 판정 실패: {ex}"
         return seat
