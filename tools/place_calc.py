@@ -707,7 +707,8 @@ def jamtest(color, secs=40):
 
 RACK_REF = "/home/ar/bf2_console/rack_ref_0905.json"
 RACK_MAP = "/home/ar/bf2_console/cam2robot_rack.json"
-FLICKER_LADDER = (167, 250, 333, 417)
+FLICKER_LADDER = (83, 167, 250, 333, 417)   # 9/6: 아침 직사광에서 83 필요 → 추가
+GAIN_LADDER = (16, 64)                        # 노출 사다리로 안 되면 gain 도 바꿔 본다(낮 16 / 밤 64)
 
 
 def rack_dots(color, n=4):
@@ -1022,13 +1023,26 @@ def health_gate(max_try=4):
         CL.expo(set=ex); time.sleep(1.5); o, r = score(); print(f"    노출 {ex}: {o}/4 rms {r:.2f}")
         if o > best[0]:
             best = (o, ex)
-    CL.expo(set=best[1]); time.sleep(1.2)
+    cur_gain = (json.load(open(CL.STORE)).get("apply") or {}).get("gain") if os.path.exists(CL.STORE) else None
+    best_gain = cur_gain
+    if best[0] < 3:
+        # ★gain 2차 패스(9/6): 직사광 낮엔 gain 16, 밤엔 64 가 필요 — 노출만으로 안 되면 gain 을 바꿔 사다리 재시도
+        for g in GAIN_LADDER:
+            if g == cur_gain:
+                continue
+            for ex in FLICKER_LADDER:
+                CL.expo(set=ex, gain=g); time.sleep(1.5); o, r = score(); print(f"    gain {g} 노출 {ex}: {o}/4 rms {r:.2f}")
+                if o > best[0]:
+                    best = (o, ex); best_gain = g
+    CL.expo(set=best[1], **({"gain": best_gain} if best_gain else {})); time.sleep(1.2)
     if best[0] >= 3:
         stf = json.load(open(CL.STORE)) if os.path.exists(CL.STORE) else {}
-        stf.update(apply={"set": best[1]}, made=time.strftime("%Y-%m-%d %H:%M"), note="health_gate 적응 노출")
+        ap = {"set": best[1]}
+        if best_gain: ap["gain"] = best_gain
+        stf.update(apply=ap, made=time.strftime("%Y-%m-%d %H:%M"), note="health_gate 적응 노출/게인")
         json.dump(stf, open(CL.STORE, "w"), ensure_ascii=False, indent=1)
-        print(f"  노출 {best[1]} 채택·저장 ({best[0]}/4)"); return True
-    print("  ❌ 어떤 노출에서도 기둥 검출 부족 — 정지"); return False
+        print(f"  노출 {best[1]} gain {best_gain} 채택·저장 ({best[0]}/4)"); return True
+    print("  ❌ 어떤 노출/게인에서도 기둥 검출 부족 — 정지(직사광이면 블라인드)"); return False
 
 
 def release_and_retreat(color):
