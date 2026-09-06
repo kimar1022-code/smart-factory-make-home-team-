@@ -616,10 +616,15 @@ def stage_descend_reteach(color):
     if not seated:
         set_stage("SEAT FAIL", color=color)
         log(f"🛑 안착 미확인({seat.get('state')}: {seat.get('why')}) — 그리퍼 유지, 그 자리 정지. "
-            "[⛔중단]=정지 / [▶계속]=사용자가 안착 육안 확인 → 이 자리를 성공으로 간주하고 기준 재촬영 진행")
-        wait_user("SEAT FAIL — 그리퍼 유지: [⛔중단] 또는 [▶계속](안착 육안 확인 시 → 기준 재촬영)")
-        log("  사용자 [▶계속]: 안착 육안 확인 → 기준 재촬영 진행")
-        with LOCK: S["seat"] = dict(seat, user_override=True)
+            "[⛔중단]=정지 / [▶계속]=사용자 육안 확인 → 슬롯 기준만 갱신하고 놓기(15:35 사고: 판정 unknown 인 벽을 들어올려 재촬영하다 베이스 딸려가 재하강 끼임 → 재촬영 생략)")
+        wait_user("SEAT FAIL — 그리퍼 유지: [⛔중단] 또는 [▶계속](안착 육안 확인 시 → 재촬영 없이 놓기)")
+        log("  사용자 [▶계속]: 안착 육안 확인 → 재촬영 생략, 슬롯 기준 갱신 후 놓기")
+        with LOCK: S["seat"] = dict(seat, user_override=True); B = S.get("base")
+        at = PC.st()["tcp"]
+        promote_slot_ref(color, [at[0], at[1], T["z_seat"], at[3], at[4], at[5]], B or jload(F["base_last"]), note="사용자 육안 안착(판정 unknown) → 슬롯 기준 갱신, 카메라 기준 재촬영 생략")
+        release_and_rise(color, rr)
+        set_stage("DONE (안착 미확인·사용자 개방·재촬영 생략)", color=color)
+        return False
     at = PC.st()["tcp"]
     with LOCK: B = S.get("base")
     if not B:
@@ -637,6 +642,12 @@ def stage_descend_reteach(color):
             teach_hover(color, src)
         except Exception as ex:
             log(f"  ⚠ z440 기준 재촬영 실패 [{src}]: {ex}")
+    # 15:35 사고: 들어올릴 때 베이스가 딸려 움직이면 같은 XY 재하강은 기둥 꼭대기를 찍음 → 재하강 전 정렬 한 번 더(방금 찍은 기준으로)
+    set_stage("3' RE-ALIGN", color=color)
+    roles = ALIGN_ROLES.get(color); srcs = list(roles) if roles else ALIGN_SRCS.get(color)
+    HA.align(color, srcs=srcs, roles=roles)
+    at = PC.st()["tcp"]
+    log(f"  재하강 전 정렬 완료 TCP ({at[0]:.2f},{at[1]:.2f}) rz{at[5]:+.2f}")
     set_stage("3' RE-DESCEND", color=color)
     PC.descend_monitored(color, at[0], at[1], [180.0, 0.0, at[5]], T["z_seat"], rr.get("grip_close", 13))
     seat2 = seat_check(color); log(f"  재안착 판정: {seat2}")
