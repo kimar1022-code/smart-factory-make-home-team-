@@ -269,9 +269,12 @@ def slot_target(color, B, grasp=None):
         raise Gate(f"{color} 슬롯 기준 없음 — 손으로 안착 → 로봇으로 물고 '슬롯 기준 1/2' → 놓고 관측자세 → '슬롯 기준 2/2'")
     br = ref["base"]; seat = ref["seat_tcp"]
     dyaw = HG.wrap_deg(B["yaw"] - br["yaw"])
-    sx, sy = seat[0] - br["x"], seat[1] - br["y"]
+    # 15:44 실기: 베이스 x/y 는 관측 화면중심 원점의 로컬 mm, seat 는 로봇 좌표 → 그대로 빼면 회전 중심이 ~400mm 어긋나
+    #   Δyaw 0.5°→3.6mm, 0.8°→6.3mm, 2°→14mm 오차(그동안 카메라 정렬이 흡수). 로컬 원점 ≈ 관측자세 XY(카메라 오프셋 수십 mm 는 미보정).
+    ox, oy = OBS[0], OBS[1]
+    sx, sy = seat[0] - (ox + br["x"]), seat[1] - (oy + br["y"])
     c, s = math.cos(math.radians(dyaw)), math.sin(math.radians(dyaw))
-    tx, ty = B["x"] + c * sx - s * sy, B["y"] + s * sx + c * sy
+    tx, ty = (ox + B["x"]) + c * sx - s * sy, (oy + B["y"]) + s * sx + c * sy
     rz = HG.wrap_deg(seat[5] + dyaw)
     pre = (0.0, 0.0, 0.0)
     if grasp and grasp.get("ok"):
