@@ -125,6 +125,19 @@ def jsave(path, d):
 
 
 # ------------------------------------------------------------------ 로봇(중단 가능 이동) — 부품들이 이걸 쓰도록 주입
+def _wait_still(timeout=30):
+    """이동이 멈출 때까지(busy 해제 + TCP 정지) 대기."""
+    t0 = time.time(); prev = None
+    while time.time() - t0 < timeout:
+        if ABORT.is_set():
+            PC.post("stop", {"dry_run": False}); raise Abort()
+        time.sleep(0.25); s = PC.st(); c = s["tcp"]
+        if prev is not None and not s["busy"] and max(abs(c[i] - prev[i]) for i in range(3)) < 0.02:
+            return c
+        prev = c
+    return PC.st()["tcp"]
+
+
 def move(tcp, tol=0.6, timeout=60, tag=""):
     if ABORT.is_set():
         raise Abort()
@@ -147,6 +160,23 @@ def move(tcp, tol=0.6, timeout=60, tag=""):
             log(f"  ✓ {tag} ({c[0]:.1f},{c[1]:.1f},{c[2]:.1f}) rz{c[5]:+.2f}")
             return c
         time.sleep(0.2)
+    # 19:41 실기: 목표에서 1.04mm 떨어진 곳에 서면 그보다 작은 이동은 로봇이 실행하지 않아 스스로 못 좁힘(최소 실행 이동량).
+    #   남은 오차가 작으면 1mm 되돌기(초과해 갔다가 되돌아오기)로 한 번 마무리한 뒤 판정한다.
+    c = PC.st()["tcp"]; rem = [tcp[i] - c[i] for i in range(3)]; n = math.hypot(rem[0], rem[1])
+    if n <= 3.0 and abs(rem[2]) <= 3.0 and not PC.st().get("frozen"):
+        log(f"  {tag} 잔차 {n:.2f}mm — 1mm 되돌기로 마무리")
+        PC.speed(SPD_SEAT)
+        ux, uy = (rem[0] / n, rem[1] / n) if n > 1e-6 else (0.0, 0.0)
+        over = [tcp[0] + ux * 1.0, tcp[1] + uy * 1.0, tcp[2] + (1.0 if rem[2] >= 0 else -1.0), tcp[3], tcp[4], tcp[5]]
+        try:
+            PC.post("move_tcp", {"tcp": over, "dry_run": False}); _wait_still(30)
+            PC.post("move_tcp", {"tcp": list(tcp), "dry_run": False}); _wait_still(30)
+        except Exception as ex:
+            log(f"  되돌기 실패: {ex}")
+        c = PC.st()["tcp"]
+        if max(abs(c[i] - tcp[i]) for i in range(3)) <= max(tol, 1.2):
+            log(f"  ✓ {tag}(되돌기) ({c[0]:.1f},{c[1]:.1f},{c[2]:.1f}) rz{c[5]:+.2f}")
+            return c
     raise RuntimeError(f"{tag} 미도달 목표{[round(v, 1) for v in tcp[:3]]} 현재{[round(v, 1) for v in PC.st()['tcp'][:3]]}")
 
 
@@ -623,7 +653,10 @@ def stage_descend(color):
         log(f"🛑 안착 미확인({seat.get('state')}: {seat.get('why')}) — 그리퍼 유지, 그 자리 정지. "
             "[⛔중단]=이대로 정지(벽은 사용자가 처리) / [▶계속]=사용자가 안착을 육안 확인 → 그리퍼 열고 상승(기준 승격 없음)")
         wait_user("SEAT FAIL — 그리퍼 유지, 사용자 판단 대기: [⛔중단] 또는 [▶계속](안착 육안 확인 시)")
-        log("  사용자 [▶계속]: 안착 육안 확인으로 간주 → 개방·상승 (기준 승격 없음)")
+        log("  사용자 [▶계속]: 안착 육안 확인으로 간주 → 개방·상승 (카메라 기준 승격 없음)")
+        if not (((jload(os.path.join(STATE, "pose_refs", f"{color}.json")) or {}).get("seat") or {}).get("cams")):
+            log("  (안착 기준이 아직 없는 색 → 지금 앉은 자리로 최초 촬영: 로봇은 움직이지 않음)")
+            promote_seat_ref(color)          # 부트스트랩 1회. 이후는 seated 성공 시에만 갱신
         with LOCK: S["seat"] = dict(seat, user_override=True)
     else:
         at = PC.st()["tcp"]
