@@ -15,7 +15,16 @@
 버튼(벽별): 슬롯 기준 저장(1/2 안착 TCP, 2/2 관측 페어링) · 랙 보정 저장 · 좋은 파지 서명 저장 · z440 기준 저장 · 고정캠 매핑(newcam/side)
 동작:  ▶ 사이클(1→2→2' 자동, 필요한 기준이 없으면 그 자리에서 멈추고 버튼을 기다림) · ⬇ 하강 · ⛔ 중단 · 관측자세로
 
+9/6 보강 5건:
+  ① 하강 후 안착 판정이 seated 가 아니면 **그리퍼를 열지 않고 그 자리에서 정지**(SEAT FAIL) → [⛔중단](그대로 정지, 벽은 사용자가)
+     또는 [▶계속](사용자가 육안으로 안착 확인 → 개방·상승, 기준 승격은 없음). seated 일 때만 promote_ref·슬롯 기준 승격·개방·상승.
+  ② 하강 게이트: 정렬 완료 TCP ↔ 하강 직전 TCP 가 XY 0.5mm / rz 0.3° 안 + z ±3 + 정렬 후 15분 이내(넘으면 재정렬 요구) + 색 일치.
+  ③ 안착 성공 시 슬롯 기준 자동 승격(안착 TCP x·y·rz + 이번 사이클 베이스; z 는 티칭값 유지) — 이전 값은 history(최대 5) 보존.
+  ④ run4(op=run4 / --auto): blue→yellow→red→red_s 연속, 벽마다 빈손 베이스 재측정, 하강은 매번 [⬇ 하강] 버튼에서 대기. 하나라도 정지·실패면 전체 중단.
+  ⑤ slot_both: 슬롯 기준 1/2(벽 물고 TCP) → "벽 놓고 그리퍼 빼기" 대기(▶계속) → 2/2 를 한 버튼으로. 빈손(그리퍼 ≤ 닫힘값 또는 벽 점 0)이면 1/2 거부.
+
   python3 house_cycle.py            # 서버 :8776  (http://<ip>:8776/)
+  python3 house_cycle.py --auto     # 서버 기동 + run4 를 바로 대기열에 (각 벽 하강은 버튼)
 """
 import sys, os, json, math, time, threading, queue, traceback
 import urllib.request as UR
@@ -57,6 +66,10 @@ ARUCO_WARN_MM, ARUCO_WARN_DEG = 1.5, 0.3        # 고정 자 대비 카메라 �
 GRASP_GATE_MM, GRASP_GATE_DEG = PC.GRASP_GATE_MM, PC.GRASP_GATE_DEG   # 1.0 / 0.3
 PRECORR_MAX_MM = 1.0                            # 파지 편차 선보정 상한(부호 미검증 — 호버 정렬이 나머지를 흡수)
 SPD_MOVE, SPD_DESC, SPD_SEAT = PC.SPD_MOVE, PC.SPD_DESC, PC.SPD_SEAT   # 30 / 10 / 3
+ALIGN_GATE_MM, ALIGN_GATE_DEG = 0.5, 0.3        # ②하강 직전 TCP 가 정렬 완료 TCP 와 이만큼 안이어야(XY 거리 / rz)
+ALIGN_MAX_AGE_S = 15 * 60                       # ②정렬 완료 후 이 시간이 지나면 하강 거부(베이스가 움직였을 수 있음 → 재정렬)
+SLOT_HISTORY_MAX = 5                            # ③슬롯 기준 승격 시 보존하는 이전 값 개수
+RUN4_ORDER = ("blue", "yellow", "red", "red_s") # ④4벽 연속 순서
 
 
 # ------------------------------------------------------------------ 상태·로그
@@ -68,7 +81,7 @@ ABORT = threading.Event()
 RESUME = threading.Event()
 S = {"stage": "IDLE", "color": None, "busy": False, "wait": None, "log": [], "err": None,
      "base": None, "rack": None, "grasp": None, "target": None, "align": None, "seat": None,
-     "gates": {}, "tcp": None, "grip": None, "made": time.strftime("%H:%M:%S")}
+     "gates": {}, "tcp": None, "grip": None, "run4": None, "made": time.strftime("%H:%M:%S")}
 _logf = None
 
 
@@ -139,6 +152,8 @@ def wait_user(what):
     while not RESUME.wait(0.2):
         if ABORT.is_set():
             raise Abort()
+    if ABORT.is_set():                 # ★abort 는 RESUME 도 함께 set 하므로(대기 깨우기) 깨어난 직후 반드시 ABORT 우선 — 아니면 '계속' 으로 오인
+        raise Abort()
     with LOCK:
         S["wait"] = None
 
@@ -348,55 +363,141 @@ def stage_carry_hover(color, T):
     finally:
         HA.restore_expo()
     cur = PC.st()["tcp"]
-    A.update(x=cur[0], y=cur[1], rz=cur[5], z=cur[2])
+    A.update(x=cur[0], y=cur[1], rz=cur[5], z=cur[2], made_t=time.time(), made=time.strftime("%H:%M:%S"))
     with LOCK: S["align"] = A
     log(f"  정렬 후 TCP x {cur[0]:.2f} y {cur[1]:.2f} rz {cur[5]:+.2f} z {cur[2]:.1f}")
     return A
 
 
-# ------------------------------------------------------------------ 3단계: 사용자 버튼 하강(막힘 감시) → 안착 판정 → 놓기
-def stage_descend(color):
+# ------------------------------------------------------------------ 3단계: 사용자 버튼 하강(막힘 감시) → 안착 판정 → (seated 만) 승격·놓기
+def descend_gate(color):
+    """②하강 직전 게이트. 정렬 완료 상태 + 같은 색 + 정렬 후 15분 이내 + z 일치 + 정렬 TCP 와 XY/rz 일치."""
     with LOCK:
-        T = S.get("target"); A = S.get("align")
+        T = S.get("target"); A = S.get("align"); col = S.get("color")
     if not (T and A and A.get("done")):
         raise Gate("하강 조건 미충족: 정렬 완료 상태가 아님")
+    if col != color:
+        raise Gate(f"하강 색 불일치: 정렬된 벽은 {col}, 요청은 {color}")
+    age = time.time() - float(A.get("made_t") or 0.0)
+    if age > ALIGN_MAX_AGE_S:
+        raise Gate(f"정렬 후 {age/60:.0f}분 경과(> {ALIGN_MAX_AGE_S//60}분) — 베이스가 움직였을 수 있음, 사이클 다시(재정렬)")
     cur = PC.st()["tcp"]
     if abs(cur[2] - (T["z_seat"] + 85.0)) > 3.0:
         raise Gate(f"지금 z{cur[2]:.0f} ≠ z{T['z_seat']+85:.0f} — 정렬 후 움직였음, 사이클 다시")
-    set_stage("3 DESCEND", color=color)
-    rr = (jload(F["rack"]) or {}).get(color) or {}
-    PC.descend_monitored(color, cur[0], cur[1], [180.0, 0.0, cur[5]], T["z_seat"], rr.get("grip_close", 13))   # 부품(3mm 단계·벽점 밀림·놓침·정체 → stop+25mm)
-    set_stage("3 SEAT CHECK", color=color)
-    seat = {"state": "skipped"}
+    dxy = math.hypot(cur[0] - A["x"], cur[1] - A["y"]); drz = abs(HG.wrap_deg(cur[5] - A["rz"]))
+    if dxy > ALIGN_GATE_MM or drz > ALIGN_GATE_DEG:
+        raise Gate(f"정렬 TCP 와 불일치 ΔXY {dxy:.2f}mm Δrz {drz:.2f}° (허용 {ALIGN_GATE_MM}mm/{ALIGN_GATE_DEG}°) — 정렬 후 움직였음, 사이클 다시")
+    log(f"  하강 게이트 OK: ΔXY {dxy:.2f}mm Δrz {drz:.2f}° 정렬 {age/60:.1f}분 전")
+    return T, A, cur
+
+
+def seat_check():
+    """안착 판정 부품(seat_verify). 실패해도 예외 대신 unknown. JSON 에 못 담는 '_' 키(이미지 등)는 버림."""
     try:
         import seat_verify as SV
         seat = SV.verify()
     except Exception as ex:
         seat = {"state": "unknown", "why": str(ex)}
-    with LOCK: S["seat"] = seat
-    log(f"  안착 판정: {seat}")
-    HA.promote_ref(color)                                          # 성공 사이클 정렬 상태 → 다음 기준
+    return {k: v for k, v in (seat or {}).items() if not str(k).startswith("_")}
+
+
+def promote_slot_ref(color, seat_tcp, B, note="자동 승격: 안착 성공 TCP + 이번 사이클 베이스"):
+    """③안착 성공한 TCP + 이번 사이클 베이스 측정을 slot_ref 로 승격. 이전 값은 history(최대 SLOT_HISTORY_MAX) 로 보존."""
+    if not B:
+        log("  ⚠ 슬롯 기준 승격 생략: 이번 사이클 베이스 측정이 없음"); return False
+    d = jload(F["slot"]) or {}
+    prev = d.get(color)
+    hist = []
+    if prev:
+        hist = [{k: v for k, v in prev.items() if k != "history"}] + list(prev.get("history") or [])
+    d[color] = {"seat_tcp": [round(float(v), 3) for v in seat_tcp], "base": {"x": B["x"], "y": B["y"], "yaw": B["yaw"]},
+                "base_rms": B.get("rms"), "made": time.strftime("%Y-%m-%d %H:%M"), "note": note, "history": hist[:SLOT_HISTORY_MAX]}
+    jsave(F["slot"], d)
+    log(f"✅ 슬롯 기준 승격 [{color}] seat {[round(v, 1) for v in seat_tcp[:3]]} rz {seat_tcp[5]:+.2f} ↔ 베이스 ({B['x']:.2f},{B['y']:.2f},{B['yaw']:+.3f}°)  history {len(hist[:SLOT_HISTORY_MAX])}건")
+    return True
+
+
+def release_and_rise(color, rr):
     set_stage("3 RELEASE", color=color)
     log(f"  그리퍼 열기 → {PC.gripper(rr.get('grip_open', GRIP_OPEN))}")
     cur = PC.st()["tcp"]
     PC.speed(SPD_SEAT); move([cur[0], cur[1], cur[2] + 30] + list(cur[3:]), tag="수직 +30")
     PC.speed(SPD_DESC); move([cur[0], cur[1], HOVER_Z] + list(cur[3:]), tag="호버 z478")
     PC.speed(SPD_MOVE); move([cur[0], cur[1], SAFE_Z] + list(cur[3:]), tag="SAFE"); PC.speed(1)
-    set_stage("DONE", color=color)
+
+
+def stage_descend(color):
+    """③하강 → 안착 판정. seated: promote_ref + 슬롯 기준 승격 + 개방 + 상승.
+    아니면 ①그리퍼 유지·그 자리 정지(SEAT FAIL) → [⛔중단] 또는 [▶계속](사용자 육안 확인 → 개방·상승, 승격 없음). 반환: seated."""
+    T, A, cur = descend_gate(color)
+    set_stage("3 DESCEND", color=color)
+    rr = (jload(F["rack"]) or {}).get(color) or {}
+    PC.descend_monitored(color, cur[0], cur[1], [180.0, 0.0, cur[5]], T["z_seat"], rr.get("grip_close", 13))   # 부품(3mm 단계·벽점 밀림·놓침·정체 → stop+25mm)
+    set_stage("3 SEAT CHECK", color=color)
+    seat = seat_check()
+    seated = str(seat.get("state", "")).startswith("seated")
+    with LOCK: S["seat"] = seat
+    log(f"  안착 판정: {seat}")
+    if not seated:
+        set_stage("SEAT FAIL", color=color)
+        log(f"🛑 안착 미확인({seat.get('state')}: {seat.get('why')}) — 그리퍼 유지, 그 자리 정지. "
+            "[⛔중단]=이대로 정지(벽은 사용자가 처리) / [▶계속]=사용자가 안착을 육안 확인 → 그리퍼 열고 상승(기준 승격 없음)")
+        wait_user("SEAT FAIL — 그리퍼 유지, 사용자 판단 대기: [⛔중단] 또는 [▶계속](안착 육안 확인 시)")
+        log("  사용자 [▶계속]: 안착 육안 확인으로 간주 → 개방·상승 (기준 승격 없음)")
+        with LOCK: S["seat"] = dict(seat, user_override=True)
+    else:
+        at = PC.st()["tcp"]
+        if not HA.promote_ref(color):                               # 성공 사이클 정렬 상태 → 다음 z440 기준
+            log("  (z440 기준 승격 없음: 이번 정렬의 마지막 측정이 없음)")
+        with LOCK: B = S.get("base")
+        promote_slot_ref(color, [at[0], at[1], T["z_seat"], at[3], at[4], at[5]], B)   # z 는 티칭값 유지(접촉 조기정지 z 승격 시 위로 표류 방지)
+    release_and_rise(color, rr)
+    set_stage("DONE" if seated else "DONE (안착 미확인·사용자 개방)", color=color)
+    return seated
 
 
 # ------------------------------------------------------------------ 사이클
 def run_cycle(color, teach_rack=False):
     global _logf
+    if _logf:
+        try: _logf.close()
+        except Exception: pass
     _logf = open(os.path.join(STATE, "logs", f"cycle_{color}_{time.strftime('%m%d_%H%M%S')}.log"), "a")
     with LOCK:
         S.update(color=color, err=None, base=None, rack=None, grasp=None, target=None, align=None, seat=None)
-    B = stage_base()
+    B = stage_base()                                               # 빈손 베이스 재측정(벽마다)
     slot_target(color, B)                                          # 기준 없으면 여기서 정지(픽 전에 안다)
     G = stage_rack(color, teach_rack)
     T = slot_target(color, B, G)
     stage_carry_hover(color, T)
     set_stage("WAIT DESCEND", wait="[⬇ 하강] 버튼 (x·y·yaw 확인 후)", color=color)
+
+
+def run_multi(order=RUN4_ORDER):
+    """④4벽 연속. 벽마다 run_cycle(빈손 베이스 재측정 포함) → [⬇ 하강] 버튼 대기 → stage_descend.
+    어느 벽이든 Gate/Abort/예외/안착 미확인이면 그 자리에서 전체 중단(다음 벽 진행 없음)."""
+    order = [c for c in order if c in COLORS]
+    with LOCK:
+        S["run4"] = {"order": order, "idx": 0, "done": [], "active": True}
+    log(f"══ run4 시작: {' → '.join(order)} (벽마다 빈손 베이스 재측정, 하강은 매번 버튼)")
+    try:
+        for i, color in enumerate(order):
+            with LOCK: S["run4"]["idx"] = i
+            if i > 0:
+                g = PC.grip_read(); gc = ((jload(F["rack"]) or {}).get(order[i - 1]) or {}).get("grip_close", 13)
+                if g.isdigit() and int(g) <= gc:
+                    raise Gate(f"run4: 그리퍼 {g} ≤ 닫힘값 {gc} — 빈손이 아님, [{color}] 진행 금지")
+            log(f"══ run4 {i+1}/{len(order)} [{color}] — 빈손 베이스 재측정부터")
+            run_cycle(color)
+            wait_user(f"[⬇ 하강] 버튼 (x·y·yaw 확인 후) — run4 {i+1}/{len(order)} {color}")
+            if not stage_descend(color):
+                raise Gate(f"run4 중단: [{color}] 안착 미확인(사용자 개방) — 남은 {order[i+1:]} 진행 안 함")
+            with LOCK: S["run4"]["done"].append(color)
+        set_stage("RUN4 DONE")
+        log(f"✅ run4 완료: {order}")
+    finally:
+        with LOCK:
+            if S.get("run4"): S["run4"]["active"] = False
 
 
 # ------------------------------------------------------------------ 티칭 버튼
@@ -426,6 +527,25 @@ def teach_slot_base(color):
     d[color] = {"seat_tcp": seat, "base": {"x": B["x"], "y": B["y"], "yaw": B["yaw"]}, "base_rms": B["rms"], "made": time.strftime("%Y-%m-%d %H:%M")}
     jsave(F["slot"], d); _pending_seat.pop(color, None)
     log(f"✅ 슬롯 기준 저장 [{color}] seat {[round(v, 1) for v in seat[:3]]} rz {seat[5]:+.1f} ↔ 베이스 ({B['x']:.1f},{B['y']:.1f},{B['yaw']:+.2f}°)")
+
+
+def teach_slot_both(color):
+    """⑤슬롯 기준 1/2 + 2/2 한 버튼. 1/2 는 벽을 물고 있어야(그리퍼 > 닫힘값 그리고 손목캠 벽 점 ≥1) — 빈손이면 거부.
+    1/2 저장 → 사용자가 그리퍼 열고 벽에서 빼낸 뒤 [▶계속] → (그리퍼 열림 확인) → 관측자세 베이스 측정 → 2/2 저장."""
+    set_stage("TEACH SLOT 1/2", color=color)
+    gc = ((jload(F["rack"]) or {}).get(color) or {}).get("grip_close", 13)
+    g = PC.grip_read()
+    if g.isdigit() and int(g) <= gc:
+        raise Gate(f"슬롯 기준 1/2 거부: 그리퍼 {g} ≤ 닫힘값 {gc} — 벽을 물고 있지 않음(빈손)")
+    if not PC.held_wall_dots(color):
+        raise Gate(f"슬롯 기준 1/2 거부: 손목캠에 든 {color} 벽 점 0 — 벽을 물고 있어야 함(빈손)")
+    teach_slot_tcp(color)
+    wait_user(f"[{color}] 1/2 저장됨 — 그리퍼를 열어 벽을 놓고 벽에서 빼낸 뒤 [▶계속] (로봇이 관측자세로 올라가 2/2 측정)")
+    g = PC.grip_read()
+    if g.isdigit() and int(g) <= gc:
+        raise Gate(f"슬롯 기준 2/2 거부: 그리퍼 {g} 아직 닫힘(≤ {gc}) — 벽을 놓고 빼낸 뒤 [슬롯 기준 2/2] 로 마무리 (1/2 는 저장돼 있음)")
+    set_stage("TEACH SLOT 2/2", color=color)
+    teach_slot_base(color)
 
 
 def teach_rack_offset(color):
@@ -486,6 +606,8 @@ def worker():
             elif op == "descend": stage_descend(arg["color"])
             elif op == "goto_obs": set_stage("GOTO OBS"); goto_obs(); set_stage("IDLE")
             elif op == "slot2": set_stage("TEACH SLOT 2/2"); teach_slot_base(arg["color"]); set_stage("IDLE")
+            elif op == "slot_both": teach_slot_both(arg["color"]); set_stage("IDLE")
+            elif op == "run4": run_multi(arg.get("order") or RUN4_ORDER)
             elif op == "probe": set_stage(f"PROBE {arg['src']}"); probe_cam(arg["src"], arg["color"]); set_stage("IDLE")
         except Abort:
             try: PC.post("stop", {"dry_run": False})
@@ -516,10 +638,17 @@ def handle_cmd(q):
         return {"ok": True}
     if op == "resume":
         RESUME.set(); return {"ok": True}
-    if op in ("start", "descend", "goto_obs", "slot2", "probe"):
+    with LOCK:
+        r4 = S.get("run4"); in_run4_wait = bool(r4 and r4.get("active") and S.get("stage") == "WAIT DESCEND" and S.get("wait"))
+    if op == "descend" and in_run4_wait:                             # ④run4 는 워커가 점유 중 → 하강 버튼 = 계속
+        RESUME.set(); return {"ok": True, "note": "run4: 하강 진행"}
+    if op in ("start", "descend", "goto_obs", "slot2", "probe", "run4", "slot_both"):
         if S["busy"]:
             return {"ok": False, "err": "실행 중 — 먼저 중단"}
-        Q.put((op, {"color": color, "src": src, "teach_rack": q.get("teach", ["0"])[0] == "1"})); return {"ok": True}
+        order = [c for c in (q.get("order", [""])[0] or "").split(",") if c] or list(RUN4_ORDER)
+        if op == "run4" and any(c not in COLORS for c in order):
+            return {"ok": False, "err": f"run4 순서 {order}?"}
+        Q.put((op, {"color": color, "src": src, "order": order, "teach_rack": q.get("teach", ["0"])[0] == "1"})); return {"ok": True}
     try:                                                            # 로봇 이동 없는 즉시 명령
         if op == "slot1": teach_slot_tcp(color)
         elif op == "rack_offset": teach_rack_offset(color)
@@ -545,7 +674,8 @@ def snapshot():
     d["refs"] = refs
     d["maps"] = {"newcam": os.path.exists(HA.SRC["newcam"]["map"]), "side": os.path.exists(HA.SRC["side"]["map"]), "aruco_ref": os.path.exists(F["aruco"])}
     d["gates"] = {"정렬 완료": bool((d.get("align") or {}).get("done")), "파지 게이트": bool((d.get("grasp") or {}).get("ok")),
-                  "베이스 이번 사이클": bool(d.get("base")), "동결 아님": not d.get("frozen"), "대기 없음": d.get("wait") is None}
+                  "베이스 이번 사이클": bool(d.get("base")), "동결 아님": not d.get("frozen"),
+                  "대기 없음(하강 대기 제외)": d.get("wait") is None or d.get("stage") == "WAIT DESCEND"}
     return d
 
 
@@ -559,11 +689,13 @@ pre{background:#000;padding:8px;height:260px;overflow:auto;font-size:12px}table{
 <div>색: <select id=color><option>blue<option>yellow<option>red<option>red_s</select>
  <button class=big onclick="cmd('start')">▶ 사이클(1→2→2')</button>
  <button onclick="cmd('start',{teach:1})">▶ 사이클 + 랙 파지 티칭</button>
+ <button class=big onclick="if(confirm('4벽 연속 blue→yellow→red→red_s? 벽마다 빈손 베이스 재측정, 하강은 매번 [⬇ 하강] 버튼'))cmd('run4')">▶ 4벽 연속(run4)</button>
  <button class=big id=desc onclick="if(confirm('수직 하강? x·y·yaw 확인했나'))cmd('descend')">⬇ 하강(3)</button>
  <button class=big style="background:#a00;color:#fff" onclick="cmd('abort')">⛔ 중단</button>
  <button onclick="cmd('resume')">▶ 계속</button>
  <button onclick="cmd('goto_obs')">관측자세로</button></div>
 <div class=card><b>티칭(선택한 색)</b><br>
+ <button onclick="cmd('slot_both')">슬롯 기준 1/2+2/2 한 버튼 (물고 저장 → 놓고 ▶계속 → 측정)</button><br>
  <button onclick="cmd('slot1')">슬롯 기준 1/2 (안착 TCP)</button> <button onclick="cmd('slot2')">슬롯 기준 2/2 (관측 페어링)</button><br>
  <button onclick="cmd('rack_offset')">랙 보정 저장</button> <button onclick="cmd('sig')">좋은 파지 서명 저장</button><br>
  <button onclick="cmd('hover_ref',{src:'wrist'})">z440 기준 저장(손목)</button>
@@ -578,14 +710,15 @@ const $=id=>document.getElementById(id);
 async function cmd(op,extra={}){const p=new URLSearchParams({op,color:$('color').value,...extra});const r=await fetch('/cmd?'+p).then(r=>r.json());if(!r.ok)alert(r.err);}
 function f(o){return o?JSON.stringify(o,(k,v)=>typeof v==='number'?+v.toFixed(2):v).replace(/[{}"]/g,'').replace(/,/g,'  '):'-'}
 async function poll(){try{const s=await fetch('/state').then(r=>r.json());
- $('stage').textContent=s.stage+(s.err?'  ✖ '+s.err:'');$('wait').textContent=s.wait?'⏸ '+s.wait:'';
+ $('stage').textContent=s.stage+(s.err?'  ✖ '+s.err:'')+(s.run4?`  [run4 ${s.run4.idx+1}/${s.run4.order.length} ${s.run4.order[s.run4.idx]} 완료:${s.run4.done.join(',')||'-'}${s.run4.active?'':' 종료'}]`:'');
+ $('stage').style.color=s.stage.startsWith('SEAT FAIL')?'#f66':'';$('wait').textContent=s.wait?'⏸ '+s.wait:'';
  $('tcp').textContent=s.tcp?`tcp ${s.tcp.slice(0,3).join(',')} rz${s.tcp[5]} grip ${s.grip}${s.frozen?' ❄FROZEN':''}`:'브리지 없음';
  $('gates').innerHTML=Object.entries(s.gates).map(([k,v])=>`<div class=${v?'ok':'no'}>${v?'✔':'✘'} ${k}</div>`).join('');
  const allok=Object.values(s.gates).every(Boolean)&&s.stage==='WAIT DESCEND';$('desc').disabled=!allok;$('desc').style.opacity=allok?1:.4;
  $('refs').innerHTML='<table><tr><th>색<th>슬롯<th>랙보정<th>서명<th>z440</tr>'+Object.entries(s.refs).map(([c,r])=>`<tr><td>${c}<td>${r.slot?'✔':'✘'}<td>${r.rack_offset?'✔':(r.rack?'seed':'✘')}<td>${r.sig?'✔':'✘'}<td>${r.hover.join('/')||'✘'}`).join('')+'</table>'
   +`<div>매핑 newcam ${s.maps.newcam?'✔':'✘'} · side ${s.maps.side?'✔':'✘'} · ArUco기준 ${s.maps.aruco_ref?'✔':'✘'}</div>`;
  $('nums').innerHTML=`<div>베이스: ${f(s.base&&{x:s.base.x,y:s.base.y,yaw:s.base.yaw,rms:s.base.rms})}</div><div>랙: ${f(s.rack&&{len_px:s.rack.len_px,dang:s.rack.dang,xy:s.rack.grip_xy})}</div>
-  <div>파지: ${f(s.grasp)}</div><div>목표: ${f(s.target&&{x:s.target.x,y:s.target.y,rz:s.target.rz,dyaw:s.target.dyaw})}</div><div>정렬: ${f(s.align)}</div><div>안착: ${f(s.seat)}</div>`;
+  <div>파지: ${f(s.grasp)}</div><div>목표: ${f(s.target&&{x:s.target.x,y:s.target.y,rz:s.target.rz,dyaw:s.target.dyaw})}</div><div>정렬: ${f(s.align&&{x:s.align.x,y:s.align.y,rz:s.align.rz,z:s.align.z,made:s.align.made})}</div><div>안착: ${f(s.seat&&{state:s.seat.state,why:s.seat.why,user_override:s.seat.user_override})}</div>`;
  $('log').textContent=s.log.slice(-60).join('\n');$('log').scrollTop=1e9;}catch(e){}}
 setInterval(poll,1000);poll();
 </script>"""
@@ -609,5 +742,7 @@ class H(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     seed_state()
     threading.Thread(target=worker, daemon=True).start()
+    if "--auto" in sys.argv:                                        # ④서버 기동과 함께 run4 를 대기열에(하강은 버튼)
+        Q.put(("run4", {"order": list(RUN4_ORDER)})); log("--auto: run4 대기열 등록 (벽마다 하강은 [⬇ 하강] 버튼)")
     log(f"house_cycle :{PORT}  state={STATE}")
     ThreadingHTTPServer(("0.0.0.0", PORT), H).serve_forever()

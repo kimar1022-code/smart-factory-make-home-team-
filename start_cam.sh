@@ -19,7 +19,7 @@ if [ "$MODE" = rs ]; then
   # 9/1: CAM_EXPOSURE=166 = 조명 120Hz 플리커 안전값(다른 노출이면 도트가 35px 씩 흔들림, 실증).
   #      CAM_DET_HZ=8 = 검출 8Hz 분리(CPU 182%→80%).
   # 9/2 실측 임계(파랑 S160=유령 컷·빨강 V55 S160=어두울 때 소실 방지·노랑 S140)
-  CAM_DET_HZ=${CAM_DET_HZ:-8} CAM_EXPOSURE=${CAM_EXPOSURE:-166} CAM_GAIN=${CAM_GAIN:-16} \
+  CAM_DET_HZ=${CAM_DET_HZ:-8} CAM_EXPOSURE=${CAM_EXPOSURE:-166} CAM_GAIN=${CAM_GAIN:-16} CAM_WB=${CAM_WB:-5500} \
   CAM_BLUE_S=${CAM_BLUE_S:-245} CAM_RED_S=${CAM_RED_S:-160} CAM_RED_V=${CAM_RED_V:-45} \
   CAM_YELLOW_S=${CAM_YELLOW_S:-140} setsid -f python3 cam_server.py --source rs > /tmp/cam_server.log 2>&1
 elif [ "$MODE" = udp ]; then
