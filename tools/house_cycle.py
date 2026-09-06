@@ -576,7 +576,10 @@ def seat_check(color=None):
         if not src:
             seat["why"] = str(seat.get("why")) + " | 안착 기준(newcam/wrist) 없음"; return seat
         dots = (cams.get(src) or {}).get("dots") or {}
-        refs = [(c, p[0], p[1]) for c, lst in dots.items() if c != wall_c for p in (lst or []) if len(p) >= 2]
+        # 20:49 실기: 화면 가장자리에 걸친 점은 잘려서 중심이 30px 씩 튄다(빨강 (15,404)) → 기준에서 제외.
+        EDGE = 60
+        refs = [(c, p[0], p[1]) for c, lst in dots.items() if c != wall_c for p in (lst or [])
+                if len(p) >= 2 and EDGE <= p[0] <= 1280 - EDGE and EDGE <= p[1] <= 720 - EDGE]
         img = HA.grab(src)
         res = []
         for c, rx, ry in refs:
@@ -604,7 +607,8 @@ def promote_seat_ref(color):
         f = os.path.join(STATE, "pose_refs", f"{color}.json")
         pr = jload(f) or {}
         img = HA.grab("newcam")
-        dots = {c: [[float(q[0]), float(q[1]), float(q[2])] for q in HA._blobs(img, c, 20, "newcam")] for c in ("blue", "yellow", "red")}
+        dots = {c: [[float(q[0]), float(q[1]), float(q[2])] for q in HA._blobs(img, c, 20, "newcam")
+                    if 60 <= q[0] <= 1220 and 60 <= q[1] <= 660] for c in ("blue", "yellow", "red")}   # 가장자리 점은 잘려 중심이 튐 → 저장 단계에서 제외
         seat = pr.setdefault("seat", {}); cams = seat.setdefault("cams", {})
         prev = cams.get("newcam")
         hist = ([{k: v for k, v in prev.items() if k != "history"}] + list((prev or {}).get("history") or []))[:3] if prev else []
