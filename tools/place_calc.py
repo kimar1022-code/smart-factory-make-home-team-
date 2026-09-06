@@ -599,18 +599,35 @@ def run(color, seat=False, do_pick=True, target=None, align=True, len_gate=False
         s_ = st(); print("현재 tcp", [round(v, 1) for v in s_["tcp"]], "grip", s_.get("gripper"), "frozen", s_.get("frozen"))
 
 
+HELD_AREA_MIN = {"blue": 500, "yellow": 500, "red": 400, "red_s": 250}   # red_s 점이 작음(z478 실측 467, 옛 하한 500 에 걸려 0개)
+HELD_NEAR_PX = 90.0
+
+
 def held_wall_dots(color):
-    """물고 있는 벽의 색점(손목캠) — 막힘 감시용. 서명이 없어도 색 규칙만으로 잡는다."""
+    """물고 있는 벽의 색점(손목캠) — 막힘 감시·파지 판정용.
+    ★9/6 정정: 면적 순으로 고르면 노랑 벽을 든 z440 에서 우상 **노란 기둥 점**(면적 ~600)이 든 벽 점으로 섞여 들어와
+      하강 중 기둥 px 이동을 '막힘'으로 오판한다. 파지 서명(grasp_ref)의 점 자리 ±HELD_NEAR_PX 안의 점을 우선 고르고,
+      서명이 없을 때만 면적 순(그때도 x≥600·면적 하한은 색별)."""
     import cv2, numpy as np
     lo, hi = WALL_DOT_HSV[color]
     b = UR.urlopen("http://127.0.0.1:8766/raw", timeout=5).read()
     img = cv2.imdecode(np.frombuffer(b, np.uint8), cv2.IMREAD_COLOR); hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     m = cv2.inRange(hsv, np.array(lo, np.uint8), np.array(hi, np.uint8)); m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     n, lab, stt, cen = cv2.connectedComponentsWithStats(m); pts = []
+    amin = HELD_AREA_MIN.get(color, 400)
     for i in range(1, n):
         a = int(stt[i, 4]); x, y = cen[i]
-        if 500 <= a <= 6000 and 600 <= x <= 1260 and 20 <= y <= 700:
+        if amin <= a <= 6000 and 600 <= x <= 1260 and 20 <= y <= 700:
             pts.append((float(x), float(y), a))
+    ref = load_grasp_ref(color)
+    anchors = [(q[0], q[1]) for q in (ref or {}).get("cam1_wall_pd") or []]
+    if anchors:
+        out = []
+        for ax, ay in anchors:
+            c = [q for q in pts if math.hypot(q[0] - ax, q[1] - ay) <= HELD_NEAR_PX]
+            if c:
+                out.append(min(c, key=lambda q: math.hypot(q[0] - ax, q[1] - ay)))
+        return out
     pts.sort(key=lambda q: -q[2])
     return pts[:2]
 
