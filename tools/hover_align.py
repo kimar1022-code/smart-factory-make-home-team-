@@ -263,9 +263,16 @@ def jinv_for(src, z_tcp, rz_tcp):
 
 def delta(ref, meas, z_tcp, rz_tcp, src="wrist"):
     s_, d_, lab = match_feats(ref["pillars"], meas["pillars"], DET[src]["search"])
-    if len(s_) < 2:
-        return None, f"[{src}] 베이스 특징 매칭 {len(s_)}개(2 필요) — 후보 {[(c, round(x), round(y)) for c, x, y, a in meas['pillars']]}"
-    sim = similarity(s_, d_); s, th, tx, ty, rms = sim
+    if len(s_) < 1:
+        return None, f"[{src}] 베이스 특징 매칭 {len(s_)}개(1 이상 필요) — 후보 {[(c, round(x), round(y)) for c, x, y, a in meas['pillars']]}"
+    if len(s_) == 1:
+        # 15:43 실기: 베이스 −2° 회전으로 새카메라에 기둥 1개만 → 평행이동만(s=1, θ=0). 회전은 rz 담당 카메라(손목 2점)가 맡는다.
+        #   베이스 회전분의 벽 기대위치 오차 ≈ 기둥↔벽 거리(≈120px)×sin(θ) — 2° 에 4px(1mm) 수준.
+        sim = (1.0, 0.0, float(d_[0][0] - s_[0][0]), float(d_[0][1] - s_[0][1]), 0.0)
+        lab = lab + ["(1특징: 평행이동만)"]
+    else:
+        sim = similarity(s_, d_)
+    s, th, tx, ty, rms = sim
     if abs(s - 1.0) > SCALE_TOL:
         return None, f"[{src}] 특징 축척 {s:.3f} — 기준과 높이/거리가 다름"
     if rms > RMS_TOL_PX:
