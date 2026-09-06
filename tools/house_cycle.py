@@ -137,9 +137,13 @@ def move(tcp, tol=0.6, timeout=60, tag=""):
 PC.move = move                                   # find_base_4pts / descend_monitored 등이 중단 가능 이동을 쓴다
 _ha_move_rel = HA.move_rel
 def _move_rel_guard(dx, dy, drz, tol=0.3, timeout=40):
+    """hover_align 의 상대이동을 이 파일의 중단 가능 move(move_tcp+dry_run+TCP 폴링) 로. 1% 속도."""
     if ABORT.is_set():
         raise Abort()
-    return _ha_move_rel(dx, dy, drz, tol, timeout)
+    c = PC.st()["tcp"]
+    tgt = [c[0] + dx, c[1] + dy, c[2], c[3], c[4], HG.wrap_deg(c[5] + drz)]
+    PC.speed(1)
+    return move(tgt, tol=tol, timeout=timeout, tag=f"상대({dx:+.1f},{dy:+.1f},{drz:+.1f}°)")
 HA.move_rel = _move_rel_guard
 
 
@@ -501,12 +505,13 @@ def run_multi(order=RUN4_ORDER):
 
 
 # ------------------------------------------------------------------ 티칭 버튼
-_pending_seat = {}
+_PENDING_F = os.path.join(STATE, "pending_seat.json")      # 1/2 는 서버 재시작에도 살아남게 파일로(12:48 재시작 때 유실 경험)
+_pending_seat = jload(_PENDING_F) or {}
 
 
 def teach_slot_tcp(color):
     """1/2: 로봇이 손 안착 벽을 물고 있는 지금 TCP 저장."""
-    cur = PC.st()["tcp"]; _pending_seat[color] = list(cur)
+    cur = PC.st()["tcp"]; _pending_seat[color] = list(cur); jsave(_PENDING_F, _pending_seat)
     log(f"  슬롯 기준 1/2 [{color}] 안착 TCP {[round(v, 2) for v in cur]} (다음: 놓고 관측자세 → 2/2)")
 
 
@@ -525,7 +530,7 @@ def teach_slot_base(color):
     B = stage_base()
     d = jload(F["slot"]) or {}
     d[color] = {"seat_tcp": seat, "base": {"x": B["x"], "y": B["y"], "yaw": B["yaw"]}, "base_rms": B["rms"], "made": time.strftime("%Y-%m-%d %H:%M")}
-    jsave(F["slot"], d); _pending_seat.pop(color, None)
+    jsave(F["slot"], d); _pending_seat.pop(color, None); jsave(_PENDING_F, _pending_seat)
     log(f"✅ 슬롯 기준 저장 [{color}] seat {[round(v, 1) for v in seat[:3]]} rz {seat[5]:+.1f} ↔ 베이스 ({B['x']:.1f},{B['y']:.1f},{B['yaw']:+.2f}°)")
 
 
@@ -571,22 +576,38 @@ def teach_grasp_sig(color):
         raise Gate("손목캠에 든 벽 점이 없음")
 
 
+def fixed_cam_seeds(src, color):
+    """고정캠(newcam/side)의 든 벽 점 씨앗 자동 선택. hover_align.wall_dots 는 고정캠에서 씨앗 없이는 항상 [] 이므로
+    (CLI 는 --wall x,y 를 받음) 여기서 고른다: 베이스 특징 면적 상한(feat_area hi)보다 큰 그 색 점 = 카메라에 가까운 든 벽 점.
+    없으면 최대 점이 2위의 2배 이상일 때만 채택. 애매하면 후보 목록과 함께 거부(사용자가 hover_view 로 확인)."""
+    img = HA.grab(src)
+    d = HA.DET[src]
+    pts = sorted([q for q in HA._blobs(img, color, d["amin_wall"], src) if q[2] >= d["amin_wall"]], key=lambda q: -q[2])
+    if not pts:
+        raise Gate(f"{src} 에 {color} 점이 하나도 없음(벽 든 채 z440 이어야 함)")
+    big = [q for q in pts if q[2] > d["feat_area"][1]]
+    if big:
+        pick = big[:2]
+    elif len(pts) == 1 or pts[0][2] >= 2.0 * pts[1][2]:
+        pick = pts[:1]
+    else:
+        raise Gate(f"{src} 에 {color} 든 벽 점을 못 고름 — 후보 {[(round(q[0]), round(q[1]), int(q[2])) for q in pts[:5]]} (면적 상한 {d['feat_area'][1]}, hover_view :8775 로 확인)")
+    seeds = [(float(q[0]), float(q[1])) for q in pick]
+    log(f"  {src} 든 {color} 벽 점 씨앗 {[(round(x), round(y)) for x, y in seeds]} 면적 {[int(q[2]) for q in pick]} (후보 {len(pts)})")
+    return seeds
+
+
 def teach_hover(color, src="wrist"):
-    seeds = None
-    if src != "wrist":
-        w = HA.wall_dots(HA.grab(src), color, None, None, src)
-        if not w:
-            raise Gate(f"{src} 에 {color} 벽 점이 안 보임")
-        seeds = [(p[0], p[1]) for p in w[:2]]
+    seeds = None if src == "wrist" else fixed_cam_seeds(src, color)
     HA.save_ref(color, src, seeds)                                  # 부품
     log(f"✅ z440 기준 저장 [{color}/{src}]")
 
 
 def probe_cam(src, color):
-    w = HA.wall_dots(HA.grab(src), color, None, None, src)
-    if not w:
-        raise Gate(f"{src} 에 {color} 벽 점이 안 보임(벽 든 채 z440 이어야 함)")
-    seeds = [(p[0], p[1]) for p in w[:2]]
+    if HA.SRC[src]["moving"] == "base":                             # 손목 부착 카메라(새카메라): 베이스 특징 추적
+        log(f"  {src} 매핑 시작(손목 부착): 베이스 특징 ±10mm 조그 + rz ±2°")
+        PC.speed(1); HA.probe_arm(src, color); return
+    seeds = fixed_cam_seeds(src, color)
     log(f"  {src} 매핑 시작: 벽 점 {[(round(x), round(y)) for x, y in seeds]} ±10mm 조그")
     HA.probe_fixed(src, color, seeds)                               # 부품(J·rot_sign 실측 → cam2robot_<src>.json)
 
