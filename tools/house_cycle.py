@@ -335,7 +335,13 @@ def stage_rack(color, teach_rack=False):
         raise Gate(f"벽 길이 불일치 {e['len_px']:.0f}px vs 기준 {L0:.0f}px ({(e['len_px']-L0)/L0*100:+.0f}%) — 끝점 미검출, 파지 금지")
     if abs(dxy[0]) + abs(dxy[1]) > 0.5:
         log(f"  (랙 재관측 카메라 오프셋 Δ ({dxy[0]:+.1f},{dxy[1]:+.1f})mm 반영)")
-    dang = HG.wrap_deg(e["ang"] - rr["ang0"])
+    # 15:39 실기: 양끝 p1/p2 순서가 x 몇 px 차이로 뒤집혀 각 +178° (방향 반전) → '삐뚤게 놓임' 오판. 벽은 방향 없는 선분:
+    #   p1 = 화면 위쪽(y 작은) 끝으로 고정, 각은 (−90,90] 로 정규화.
+    if e["p1"][1] > e["p2"][1]:
+        e = dict(e, p1=e["p2"], p2=e["p1"])
+    e["ang"] = ((e["ang"] + 90.0) % 180.0) - 90.0
+    dang = HG.wrap_deg(e["ang"] - (((rr["ang0"] + 90.0) % 180.0) - 90.0))
+    dang = ((dang + 90.0) % 180.0) - 90.0
     if abs(dang) > RACK_ANG_MAX:
         raise Gate(f"랙 위 벽 각 변화 {dang:+.2f}° > {RACK_ANG_MAX}° — 벽이 삐뚤게 놓임")
     dmm = Jinv @ np.array([e["mid"][0] - rr["Pc0"][0], e["mid"][1] - rr["Pc0"][1]])
