@@ -558,9 +558,12 @@ def stage_descend(color):
         with LOCK: S["seat"] = dict(seat, user_override=True)
     else:
         at = PC.st()["tcp"]
-        if not HA.promote_ref(color):                               # 성공 사이클 정렬 상태 → 다음 z440 기준
-            log("  (z440 기준 승격 없음: 이번 정렬의 마지막 측정이 없음)")
-        promote_seat_ref(color)                                     # 새카메라 안착 기준도 성공 자리로
+        if A.get("by") == "user_after_align":                       # 정렬 후 사용자가 조그한 사이클: 카메라 기준(z440·안착)은 승격하지 않음(정렬 자리≠성공 자리)
+            log("  (카메라 기준 승격 생략: 정렬 후 사용자 조그 — 슬롯 기준만 사용자 자리로 승격)")
+        else:
+            if not HA.promote_ref(color):                           # 성공 사이클 정렬 상태 → 다음 z440 기준(측정된 카메라 전부)
+                log("  (z440 기준 승격 없음: 이번 정렬의 마지막 측정이 없음)")
+            promote_seat_ref(color)                                 # 새카메라 안착 기준도 성공 자리로
         with LOCK: B = S.get("base")
         promote_slot_ref(color, [at[0], at[1], T["z_seat"], at[3], at[4], at[5]], B)   # z 는 티칭값 유지(접촉 조기정지 z 승격 시 위로 표류 방지)
     release_and_rise(color, rr)
