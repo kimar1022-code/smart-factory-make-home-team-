@@ -639,7 +639,9 @@ def held_wall_dots(color):
     return pts[:2]
 
 
-JAM_PX = 6.0        # 벽 점이 죠 안에서 이만큼(≈0.7mm) 움직이면 막힘
+JAM_PX = 6.0        # (구) 누적 임계. 13:41 실기: 채널 마찰로 3mm 마다 0.6~0.9px 씩 서서히 밀려 z+9 에서 누적 6.5px → 오판 정지(9/2 성공 삽입도 접촉 6~8px 이었음)
+JAM_STEP_PX = 8.0   # ★한 단계(3mm) 안에서 이만큼 튀면 막힘(벽이 멈춘 채 로봇만 3mm 내려가면 ≈33px 이므로 8px 은 충분히 민감)
+JAM_TOTAL_PX = 20.0 # 누적 이만큼(≈1.8mm) 이면 죠에서 빠지는 중 → 막힘
 JAM_STEP = 3.0      # 채널 안 하강 단위(mm)
 
 
@@ -652,7 +654,9 @@ def descend_monitored(color, x, y, rot, zs, g_close):
         raise RuntimeError("막힘 감시용 벽 점이 손목캠에 없음 — 하강 금지")
     ref_c = (sum(p[0] for p in ref) / len(ref), sum(p[1] for p in ref) / len(ref))
     print(f"  감시 기준 벽 점 {[(round(p[0]),round(p[1])) for p in ref]}")
-    z = zs + 60.0
+    d_prev = 0.0
+    z0 = st()["tcp"][2]
+    z = min(zs + 60.0, max(zs, z0))        # 13:41 후퇴(z+34) 뒤 재하강 시 위로 되돌아가지 않고 지금 높이부터
     speed(1)
     try:
         while True:
@@ -667,13 +671,16 @@ def descend_monitored(color, x, y, rot, zs, g_close):
                 c = (sum(p[0] for p in cur) / len(cur), sum(p[1] for p in cur) / len(cur))
                 d = math.hypot(c[0] - ref_c[0], c[1] - ref_c[1])
                 print(f"    그리퍼 {g} · 벽 점 이동 {d:.1f}px", flush=True)
-                if d > JAM_PX:
+                step = d - d_prev; d_prev = d
+                if step > JAM_STEP_PX or d > JAM_TOTAL_PX:
                     # ★9/5 실증: 채널 끝까지 내려간 뒤 마지막 1mm 에서 7.5px 밀림 = 밑동이 밑판에 닿은 '안착 접촉'.
                     #   바닥 근처(z_seat+8 이내)의 밀림은 막힘이 아니라 성공 신호 → 멈추고 성공 처리(더 누르지 않음).
                     if z <= zs + 8.0:
-                        print(f"  ★안착 접촉: 바닥 근처에서 벽 밀림 {d:.1f}px → 정지(성공)", flush=True)
+                        print(f"  ★안착 접촉: 바닥 근처에서 벽 밀림 {d:.1f}px(단계 {step:+.1f}) → 정지(성공)", flush=True)
                         return
-                    raise RuntimeError(f"막힘: 벽이 죠 안에서 {d:.1f}px(≈{d*0.12:.1f}mm) 밀림 (z+{z - zs:.0f})")
+                    raise RuntimeError(f"막힘: 벽이 죠 안에서 단계 {step:+.1f}px / 누적 {d:.1f}px(≈{d*0.09:.1f}mm) 밀림 (z+{z - zs:.0f})")
+                elif d > JAM_PX:
+                    print(f"    (마찰 밀림 누적 {d:.1f}px, 단계 {step:+.1f}px — 진행)", flush=True)
             else:
                 print(f"    그리퍼 {g} · 벽 점 소실 → 정지", flush=True)
                 raise RuntimeError("막힘 감시 불가(벽 점 소실)")
