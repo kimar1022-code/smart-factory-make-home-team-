@@ -445,7 +445,10 @@ def check(color, srcs=None, roles=None):
     elif rz_keys:
         drz = per[rz_keys[0]]["drz"]; rz_from = f"1점 {rz_keys[0]}(−θ 가정)"
     else:
-        drz = per[xy_keys[0]]["drz"]; rz_from = f"1점 {xy_keys[0]}(−θ 가정)"
+        # rz 담당 카메라 없음(전부 xy/measure) = ★rz 고정 모드: 상대 회전을 아예 안 준다.
+        #   9/6 17:4x 실측 — 절대 rz 명령은 0.01° 안에 정확히 도달, 상대 회전 누적은 177.85~179.90 로 흩어짐.
+        #   rz 는 운반 단계의 절대 명령(슬롯 기준 rz + 베이스 Δyaw)으로 확정하고 정렬은 XY 만 맞춘다(사용자 설계, 9/2 홈포즈 방식과 동일).
+        drz = 0.0; rz_from = "고정(절대 rz 유지)"
     return {"dmm": (mx, my), "drz": drz, "n_src": len(xy_keys), "rz_from": rz_from}, per, None
 
 
