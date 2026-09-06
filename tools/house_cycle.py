@@ -78,7 +78,10 @@ RUN4_ORDER = ("blue", "yellow", "red", "red_s") # ④4벽 연속 순서
 ALIGN_SRCS = {"blue": ("newcam",)}                # 색별 정렬 카메라(없으면 가용 전부)
 # 14:33 실기: 랙 비틀림(죠 안 +0.99°)을 새카메라 1점이 못 봐 사용자 2.35mm/0.32° 조그. 손목캠 벽 2점이 죠 안 회전을 보지만
 #   손목캠 기준(13:47)이 삽입 후 밀린 벽 각으로 찍혀 rz +0.5° 편향 → 우선 "measure"(측정·성공 시 승격만) 로 한 사이클 재기준 후 "rz" 로 승격.
-ALIGN_ROLES = {"blue": {"newcam": "xy", "wrist": "rz"}}   # 15:35 재기준(사용자 자리·이 파지) 후 손목캠 rz 담당. 조그 3회 모두 손목캠 rz 방향 일치(+1.09/+0.99/+1.26 vs 사용자 +0.32/+0.88/+0.93)
+ALIGN_ROLES = {"blue": {"newcam": "xy", "wrist": "rz"}}
+# 정렬 수렴 후 사용자 조그 4회(14:33·14:51·15:31·15:57): dx −0.89/−0.04/−1.00/−0.99, dy −2.18/−1.02/−2.03/−2.50, drz +0.32/+0.88/+0.93/+0.65
+#   → 부호가 전부 같고 크기도 비슷 → 사용자 지시("일률적이면 보정값") 대로 정렬 뒤 고정 보정(로봇 프레임, rz≈180 기준). nudge_log 로 잔차 계속 감시.
+POST_ALIGN_OFFSET = {"blue": (0.0, 0.0, 0.0)}   # 15:57 사용자 조그 자리(=이 보정값 자리)에서 채널 입구 막힘 → 보정 보류(0). 카메라 자리로 하강 시험 후 결정   # 15:35 재기준(사용자 자리·이 파지) 후 손목캠 rz 담당. 조그 3회 모두 손목캠 rz 방향 일치(+1.09/+0.99/+1.26 vs 사용자 +0.32/+0.88/+0.93)
 
 
 # ------------------------------------------------------------------ 상태·로그
@@ -162,6 +165,16 @@ def _move_rel_guard(dx, dy, drz, tol=0.3, timeout=40):
     tgt = [c[0] + dx, c[1] + dy, c[2], c[3], c[4], HG.wrap_deg(c[5] + drz)]
     return move(tgt, tol=tol, timeout=timeout, tag=f"상대({dx:+.1f},{dy:+.1f},{drz:+.1f}°)")
 HA.move_rel = _move_rel_guard
+
+
+def post_align_offset(color):
+    """정렬 수렴 뒤 사용자 통계 보정(POST_ALIGN_OFFSET). 로봇 프레임 mm/°. 기록만 남기고 이동은 1mm 되돌기 규칙을 탄다."""
+    off = POST_ALIGN_OFFSET.get(color)
+    if not off or all(abs(v) < 1e-6 for v in off):
+        return
+    dx, dy, drz = off
+    log(f"  정렬 후 사용자 통계 보정 적용: dx {dx:+.2f} dy {dy:+.2f} mm drz {drz:+.2f}°")
+    _move_rel_guard(dx, dy, drz)
 
 
 def wait_user(what):
@@ -422,6 +435,7 @@ def stage_carry_hover(color, T):
             except Exception as ex: log(f"  (참고 측정 실패: {ex})")
             log(f"  정렬 카메라: {srcs} 역할 {roles or 'both'}")
         HA.align(color, srcs=srcs, roles=roles)                # 부품(지정 카메라·역할, 수렴/발산/불일치 게이트)
+        post_align_offset(color)
         A["done"] = True
     finally:
         HA.restore_expo()
@@ -736,6 +750,7 @@ def align_here(color):
     except Exception as ex: log(f"  (참고 측정 실패: {ex})")
     log(f"  정렬 카메라: {srcs or '가용 전부'} 역할 {roles or 'both'}")
     HA.align(color, srcs=srcs, roles=roles)
+    post_align_offset(color)
     c = PC.st()["tcp"]
     A.update(done=True, x=c[0], y=c[1], rz=c[5], z=c[2], made_t=time.time(), made=time.strftime("%H:%M:%S"), by="align")
     with LOCK: S["align"] = A
