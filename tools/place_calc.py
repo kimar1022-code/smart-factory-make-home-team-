@@ -174,7 +174,8 @@ def save_grasp_sig_now(color, grip_cmd, gr):
     n, lab, stt, cen = cv2.connectedComponentsWithStats(m); g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY); pts = []
     for i in range(1, n):
         a = int(stt[i, 4]); x, y = cen[i]
-        if not (500 <= a <= 6000) or x < 600 or x > 1260 or y < 20 or y > 700:
+        # 9/6 20:2x: x_min 600 이라 랙 쪽 빨간 점(x 659)까지 서명에 섞였다(빨강 각 −55° 오저장) → 든 벽 영역(HELD_BOX x≥820)만.
+        if not (500 <= a <= 6000) or x < 820 or x > 1260 or y < 20 or y > 700:
             continue
         ys, xs = np.nonzero(lab == i); w = g[ys, xs].astype(float) + 1
         pts.append((float((xs * w).sum() / w.sum()), float((ys * w).sum() / w.sum()), a))
@@ -297,8 +298,10 @@ PICK_REF = "/home/ar/bf2_console/pick_ref_0905.json"
 WALL_DOT_HSV = {                       # 물고 있는 벽의 점 색(손목캠, 카메라 가까움 → 밝고 큼)
     "blue":   ((95, 150, 140), (115, 255, 255)),
     "yellow": ((15, 80, 110), (38, 255, 255)),
-    "red":    ((135, 90, 55), (175, 255, 255)),
-    "red_s":  ((135, 90, 55), (175, 255, 255)),
+    # 9/6 20:2x 실측(빨강 긴 벽 든 손목캠): 빨강 점 H 가 175 를 넘어가 조각남(306+240px) → 상한 179 로 하나(2424px).
+    #   0~8 구간까지 더해도 차이 없어 단일 범위 유지(place_calc 6곳이 lo,hi 튜플을 그대로 씀).
+    "red":    ((135, 90, 55), (179, 255, 255)),
+    "red_s":  ((135, 90, 55), (179, 255, 255)),
 }
 
 
