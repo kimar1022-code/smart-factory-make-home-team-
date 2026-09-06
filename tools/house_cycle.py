@@ -302,17 +302,35 @@ def stage_rack(color, teach_rack=False):
     move([rp[0], rp[1], SAFE_Z, 180.0, 0.0, 180.0], tag="랙 위 SAFE")
     log(f"  그리퍼 열기 → {PC.gripper(rr.get('grip_open', GRIP_OPEN))}")
     move(rp, tag="랙 관측자세")
-    e = PC.rack_ends(color, x_hint=rr["Pc0"][0])                # 부품(4프레임, 같은 색 여러 벽이면 x 로 선택)
+    L0 = rr["len0_px"]; dxy = (0.0, 0.0); e = None
+    for rnd in range(3):                                          # 14:42 실기: 벽이 프레임 아래끝(y707/720)까지 밀려 끝점 잘림 → 길이 −16% 정지 → 카메라를 옮겨 재관측
+        cur = PC.st()["tcp"]; dxy = (cur[0] - rp[0], cur[1] - rp[1])
+        J = np.linalg.inv(Jinv)
+        x_hint = rr["Pc0"][0] + float((J @ np.array(dxy))[0])
+        e = PC.rack_ends(color, x_hint=x_hint)                    # 부품(4프레임, 같은 색 여러 벽이면 x 로 선택)
+        ok = bool(e) and abs(e["len_px"] - L0) <= 0.10 * L0
+        if ok:
+            break
+        c, n = PC._rack_color_center(color, x_hint)
+        if c is None:
+            raise Gate("랙에서 벽 양끝을 못 잡음 — 벽이 뒤집혔거나 점 가림. 랙에 다시 놓기")
+        d = Jinv @ np.array([640.0 - c[0], 360.0 - c[1]]); nrm = float(np.hypot(*d))
+        if nrm > 50.0: d = d * (50.0 / nrm)
+        if nrm < 3.0:
+            break                                                 # 이미 중앙인데도 안 맞음 → 아래서 게이트
+        log(f"  랙 {color} 점 {n}개 중심 px ({c[0]:.0f},{c[1]:.0f}) — 끝점 잘림 의심(길이 {e['len_px'] if e else 0:.0f}px vs {L0:.0f}) → 카메라 ({d[0]:+.1f},{d[1]:+.1f})mm 이동 재관측 [{rnd+1}/3]")
+        PC.speed(SPD_MOVE); move([cur[0] + float(d[0]), cur[1] + float(d[1]), rp[2]] + list(rp[3:]), tag="랙 재관측 XY"); time.sleep(0.5)
     if not e:
         raise Gate("랙에서 벽 양끝을 못 잡음 — 벽이 뒤집혔거나 점 가림. 랙에 다시 놓기")
-    L0 = rr["len0_px"]
     if abs(e["len_px"] - L0) > 0.10 * L0:
         raise Gate(f"벽 길이 불일치 {e['len_px']:.0f}px vs 기준 {L0:.0f}px ({(e['len_px']-L0)/L0*100:+.0f}%) — 끝점 미검출, 파지 금지")
+    if abs(dxy[0]) + abs(dxy[1]) > 0.5:
+        log(f"  (랙 재관측 카메라 오프셋 Δ ({dxy[0]:+.1f},{dxy[1]:+.1f})mm 반영)")
     dang = HG.wrap_deg(e["ang"] - rr["ang0"])
     if abs(dang) > RACK_ANG_MAX:
         raise Gate(f"랙 위 벽 각 변화 {dang:+.2f}° > {RACK_ANG_MAX}° — 벽이 삐뚤게 놓임")
     dmm = Jinv @ np.array([e["mid"][0] - rr["Pc0"][0], e["mid"][1] - rr["Pc0"][1]])
-    gx, gy = rr["Tg0"][0] - dmm[0], rr["Tg0"][1] - dmm[1]         # 검증된 부호(rack_grip_xy 와 동일)
+    gx, gy = rr["Tg0"][0] - dmm[0] + dxy[0], rr["Tg0"][1] - dmm[1] + dxy[1]   # 검증된 부호(rack_grip_xy 와 동일) + 재관측 카메라 오프셋(rack_find 와 동일 식)
     ua, ux = rack_axes(e, Jinv)
     off = rr.get("offset") or {"along": 0.0, "across": 0.0}
     gx += off["along"] * ua[0] + off["across"] * ux[0]
