@@ -62,7 +62,7 @@ SCALE_TOL, RMS_TOL_PX = 0.03, 6.0
 MAX_STEP_MM, MAX_STEP_DEG = 3.0, 0.5
 TOL_MM, TOL_DEG = 0.3, 0.15
 COMBINE_TOL_MM, COMBINE_TOL_DEG = 1.5, 0.6
-MAX_ITER = 5
+MAX_ITER = 10                                   # 스텝 ≤3mm 라 20mm 급 초기 오차(회전 중심 버그 전) 도 수렴하게
 # ★z440 노출: 관측자세(z650)용 417 이면 가까워진 기둥 점이 하얗게 날아간다(9/6 00:5x 라이브: 노랑 S4·V255, 파랑 H90·V251 → 검출 0).
 #   이것이 "벽 물고 가까워지면 기둥점·벽점 인식 안 됨"의 원인. 라이브 재현(00:5x, 관측 노출 417): 333/250/167 은 파랑만, 83 에서 파랑+노랑.
 #   호버 정렬은 플리커 안전값 사다리(250·167·83)를 전부 시도해 기준 특징이 가장 많이 매칭되는 노출을 고르고, 끝나면 관측 노출로 복원.
@@ -469,7 +469,8 @@ def align(color, dry=False, tol_mm=TOL_MM, tol_deg=TOL_DEG, srcs=None, roles=Non
         print(f"  호버정렬 {it}: 결합 XY ({C['dmm'][0]:+.2f},{C['dmm'][1]:+.2f}) rz {C['drz']:+.2f}° [{C['n_src']}캠, rz {C['rz_from']}]", flush=True)
         if e_mm <= tol_mm and e_deg <= tol_deg:
             print(f"  ✅ 호버 정렬 수렴 ({e_mm:.2f}mm, {e_deg:.2f}°)"); return True
-        if prev is not None and (e_mm > prev[0] * 1.2 + 0.2 or e_deg > prev[1] * 1.2 + 0.1):
+        # 15:44 실기: 18.6→14.2mm 로 줄고 있는데 rz 0.05→0.17°(손목캠 잡음) 로 '발산' 오판 → 각은 0.3° 이하 변동은 무시
+        if prev is not None and (e_mm > prev[0] * 1.2 + 0.2 or (e_deg > 0.3 and e_deg > prev[1] * 1.2 + 0.1)):
             raise RuntimeError(f"호버 정렬 발산({prev[0]:.2f}→{e_mm:.2f}mm, {prev[1]:.2f}→{e_deg:.2f}°) — 부호/매핑 의심, 정지")
         prev = (e_mm, e_deg)
         dx, dy = (max(-MAX_STEP_MM, min(MAX_STEP_MM, v)) for v in C["dmm"])
