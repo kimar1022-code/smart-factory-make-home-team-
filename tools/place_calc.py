@@ -640,8 +640,8 @@ def held_wall_dots(color):
 
 
 JAM_PX = 6.0        # (구) 누적 임계. 13:41 실기: 채널 마찰로 3mm 마다 0.6~0.9px 씩 서서히 밀려 z+9 에서 누적 6.5px → 오판 정지(9/2 성공 삽입도 접촉 6~8px 이었음)
-JAM_STEP_PX = 8.0   # ★한 단계(3mm) 안에서 이만큼 튀면 막힘(벽이 멈춘 채 로봇만 3mm 내려가면 ≈33px 이므로 8px 은 충분히 민감)
-JAM_TOTAL_PX = 20.0 # 누적 이만큼(≈1.8mm) 이면 죠에서 빠지는 중 → 막힘
+JAM_STEP_PX = 5.0   # ★한 단계(3mm) 안에서 이만큼 튀면 막힘(마찰 밀림 0.6~0.9px/단계, 진짜 막힘 ≈33px/단계). 사용자 "벽 부러뜨리지 말 것" → 8→5
+JAM_TOTAL_PX = 15.0 # 누적 이만큼(≈1.4mm) 이면 죠에서 빠지는 중 → 막힘(20→15)
 JAM_STEP = 3.0      # 채널 안 하강 단위(mm)
 
 
@@ -656,7 +656,8 @@ def descend_monitored(color, x, y, rot, zs, g_close):
     print(f"  감시 기준 벽 점 {[(round(p[0]),round(p[1])) for p in ref]}")
     d_prev = 0.0
     z0 = st()["tcp"][2]
-    z = min(zs + 60.0, max(zs, z0))        # 13:41 후퇴(z+34) 뒤 재하강 시 위로 되돌아가지 않고 지금 높이부터
+    # 15:35·15:57 실기: 두 막힘 모두 'z440→z_seat+60 첫 25mm 무감시 이동' 에서 발생(채널 입구) → 지금 높이에서 바로 JAM_STEP 씩 감시하며 내려간다.
+    z = max(zs, z0 - JAM_STEP)
     speed(1)
     try:
         while True:
