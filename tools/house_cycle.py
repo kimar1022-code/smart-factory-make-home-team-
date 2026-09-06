@@ -69,6 +69,7 @@ PRECORR_RZ = False                              # 13:36·14:01 실기 2회: rz �
 SEAT_NEWCAM_TOL_PX = 12                         # 새카메라 안착 판정: 기둥 점이 안착 기준 자리에서 이 px 안이면 seated(≈2.5mm)
 SPD_MOVE, SPD_DESC, SPD_SEAT = PC.SPD_MOVE, PC.SPD_DESC, PC.SPD_SEAT   # 30 / 10 / 3
 ALIGN_GATE_MM, ALIGN_GATE_DEG = 0.5, 0.3        # ②하강 직전 TCP 가 정렬 완료 TCP 와 이만큼 안이어야(XY 거리 / rz)
+MIN_EXEC_MM = 0.8                               # 로봇이 실제로 실행하는 최소 이동량(9/1 실증 0.6~1.15) — 그 미만은 1mm 되돌기로
 ALIGN_MAX_AGE_S = 15 * 60                       # ②정렬 완료 후 이 시간이 지나면 하강 거부(베이스가 움직였을 수 있음 → 재정렬)
 SLOT_HISTORY_MAX = 5                            # ③슬롯 기준 승격 시 보존하는 이전 값 개수
 RUN4_ORDER = ("blue", "yellow", "red", "red_s") # ④4벽 연속 순서
@@ -149,8 +150,16 @@ def _move_rel_guard(dx, dy, drz, tol=0.3, timeout=40):
     if ABORT.is_set():
         raise Abort()
     c = PC.st()["tcp"]
-    tgt = [c[0] + dx, c[1] + dy, c[2], c[3], c[4], HG.wrap_deg(c[5] + drz)]
     PC.speed(1)
+    n = math.hypot(dx, dy)
+    if 0.0 < n < MIN_EXEC_MM:
+        # 14:47 실기: −0.4mm 상대이동을 로봇이 버림(9/1 실증: 최소 실행 이동량 0.6~1.15mm, 브리지는 started) → 40s 미도달 정지.
+        # 9/3 '1mm 되돌기': 같은 방향으로 (d+1mm) 갔다가 1mm 되돌아 순이동 d 를 만든다(두 이동 모두 ≥1mm).
+        ux, uy = dx / n, dy / n
+        move([c[0] + dx + ux * 1.0, c[1] + dy + uy * 1.0, c[2], c[3], c[4], HG.wrap_deg(c[5] + drz)], tol=tol, timeout=timeout, tag=f"상대({dx:+.2f},{dy:+.2f})+1mm 되돌기 1/2")
+        c2 = PC.st()["tcp"]
+        return move([c2[0] - ux * 1.0, c2[1] - uy * 1.0, c2[2], c2[3], c2[4], c2[5]], tol=tol, timeout=timeout, tag="되돌기 2/2")
+    tgt = [c[0] + dx, c[1] + dy, c[2], c[3], c[4], HG.wrap_deg(c[5] + drz)]
     return move(tgt, tol=tol, timeout=timeout, tag=f"상대({dx:+.1f},{dy:+.1f},{drz:+.1f}°)")
 HA.move_rel = _move_rel_guard
 
