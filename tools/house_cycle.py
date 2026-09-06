@@ -75,6 +75,9 @@ RUN4_ORDER = ("blue", "yellow", "red", "red_s") # ④4벽 연속 순서
 # 13:53 실기 2회: 손목캠↔새카메라 불일치 2.1mm 반복. 사용자 육안 자리와 비교하면 새카메라가 두 번 다 가까웠음(rz 특히).
 #   손목캠은 든 벽 윗점이 프레임 가장자리(x≈1025)라 원근·죠 안 기울기에 민감 → 파랑은 새카메라 단독 정렬(손목캠은 참고 출력).
 ALIGN_SRCS = {"blue": ("newcam",)}                # 색별 정렬 카메라(없으면 가용 전부)
+# 14:33 실기: 랙 비틀림(죠 안 +0.99°)을 새카메라 1점이 못 봐 사용자 2.35mm/0.32° 조그. 손목캠 벽 2점이 죠 안 회전을 보지만
+#   손목캠 기준(13:47)이 삽입 후 밀린 벽 각으로 찍혀 rz +0.5° 편향 → 우선 "measure"(측정·성공 시 승격만) 로 한 사이클 재기준 후 "rz" 로 승격.
+ALIGN_ROLES = {"blue": {"newcam": "xy", "wrist": "measure"}}   # 있으면 ALIGN_SRCS 대신 사용
 
 
 # ------------------------------------------------------------------ 상태·로그
@@ -375,14 +378,14 @@ def stage_carry_hover(color, T):
         wait_user(f"{color} z{zh:.0f} 기준 없음: 콘솔 조그로 육안 정렬 후 [z440 기준 저장] → 계속")
     A = {"done": False}
     try:
-        srcs = ALIGN_SRCS.get(color)
+        roles = ALIGN_ROLES.get(color); srcs = list(roles) if roles else ALIGN_SRCS.get(color)
         if srcs:
             try:
                 _, per, _ = HA.check(color)                         # 참고: 전 카메라 측정치 로그
                 for D in per.values(): log(f"  (참고) {HA.fmt(D)}")
             except Exception as ex: log(f"  (참고 측정 실패: {ex})")
-            log(f"  정렬 카메라: {srcs}")
-        HA.align(color, srcs=srcs)                             # 부품(지정 카메라, 수렴/발산/불일치 게이트)
+            log(f"  정렬 카메라: {srcs} 역할 {roles or 'both'}")
+        HA.align(color, srcs=srcs, roles=roles)                # 부품(지정 카메라·역할, 수렴/발산/불일치 게이트)
         A["done"] = True
     finally:
         HA.restore_expo()
@@ -433,8 +436,22 @@ def descend_gate(color):
         raise Gate(f"지금 z{cur[2]:.0f} 가 z{T['z_seat']+3:.0f}~{T['z_seat']+88:.0f} 밖 — 정렬 후 움직였음, 사이클 다시")
     dxy = math.hypot(cur[0] - A["x"], cur[1] - A["y"]); drz = abs(HG.wrap_deg(cur[5] - A["rz"]))
     if dxy > ALIGN_GATE_MM or drz > ALIGN_GATE_DEG:
-        raise Gate(f"정렬 TCP 와 불일치 ΔXY {dxy:.2f}mm Δrz {drz:.2f}° (허용 {ALIGN_GATE_MM}mm/{ALIGN_GATE_DEG}°) — 정렬 후 움직였음, 사이클 다시")
-    log(f"  하강 게이트 OK: ΔXY {dxy:.2f}mm Δrz {drz:.2f}° 정렬 {age/60:.1f}분 전")
+        # 14:33 실기: 랙 비틀림(죠 안 +0.99°)을 새카메라 1점 정렬이 못 봐서 사용자가 2.35mm/0.32° 조그 → 설계대로 사용자 판단이 최종.
+        # 거부 대신 '사용자 후보정' 으로 기록하고 지금 TCP 로 하강. (정렬 TCP 는 align_tcp 로 보존 → nudge_log 에서 카메라 vs 사용자 비교)
+        if dxy > 8.0 or drz > 2.0:
+            raise Gate(f"정렬 TCP 와 {dxy:.1f}mm/{drz:.1f}° 차이 — 너무 큼(8mm/2°), 사이클 다시")
+        log(f"  ⚠ 정렬 후 사용자 조그 ΔXY {dxy:.2f}mm(dx {cur[0]-A['x']:+.2f}, dy {cur[1]-A['y']:+.2f}) Δrz {HG.wrap_deg(cur[5]-A['rz']):+.2f}° → 사용자 자리로 하강(기록)")
+        try:
+            rec = {"made": time.strftime("%Y-%m-%d %H:%M:%S"), "color": color, "by": "user_after_align",
+                   "align_tcp": [A["x"], A["y"], A["rz"]], "descend_tcp": [round(v, 3) for v in cur],
+                   "user_minus_align": [round(cur[0] - A["x"], 3), round(cur[1] - A["y"], 3), round(HG.wrap_deg(cur[5] - A["rz"]), 3)],
+                   "grasp": S.get("grasp")}
+            open(os.path.join(STATE, "nudge_log.jsonl"), "a").write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except Exception: pass
+        A = dict(A, x=cur[0], y=cur[1], rz=cur[5], z=cur[2], by="user_after_align", made_t=time.time())
+        with LOCK: S["align"] = A
+    else:
+        log(f"  하강 게이트 OK: ΔXY {dxy:.2f}mm Δrz {drz:.2f}° 정렬 {age/60:.1f}분 전")
     return T, A, cur
 
 
@@ -662,13 +679,13 @@ def align_here(color):
     PC.speed(SPD_SEAT); move([cur[0], cur[1], zh] + list(cur[3:]), tag=f"z{zh:.0f}")
     A = {"done": False}
     with LOCK: S["align"] = A
-    srcs = ALIGN_SRCS.get(color)
+    roles = ALIGN_ROLES.get(color); srcs = list(roles) if roles else ALIGN_SRCS.get(color)
     try:
         _, per, _ = HA.check(color)
         for D in per.values(): log(f"  (참고) {HA.fmt(D)}")
     except Exception as ex: log(f"  (참고 측정 실패: {ex})")
-    log(f"  정렬 카메라: {srcs or '가용 전부'}")
-    HA.align(color, srcs=srcs)
+    log(f"  정렬 카메라: {srcs or '가용 전부'} 역할 {roles or 'both'}")
+    HA.align(color, srcs=srcs, roles=roles)
     c = PC.st()["tcp"]
     A.update(done=True, x=c[0], y=c[1], rz=c[5], z=c[2], made_t=time.time(), made=time.strftime("%H:%M:%S"), by="align")
     with LOCK: S["align"] = A

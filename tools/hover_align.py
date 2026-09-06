@@ -386,11 +386,13 @@ def available_sources(color):
     return out
 
 
-def check(color, srcs=None):
-    """가용 카메라 전부 Δ. 반환 (combined, per_src, why). combined=None 이면 하강 금지."""
+def check(color, srcs=None, roles=None):
+    """가용 카메라 전부 Δ. 반환 (combined, per_src, why). combined=None 이면 하강 금지.
+    roles: {src: "xy"|"rz"|"both"|"measure"} — 결합에 쓰는 역할(measure=측정·승격만, 결합 제외). 없으면 전부 both."""
     if not hasattr(check, "expo_done"):
         check.expo_done = False
-    srcs = srcs or available_sources(color)
+    roles = roles or {}
+    srcs = srcs or (list(roles) if roles else None) or available_sources(color)
     if not srcs:
         return None, {}, f"{color} 호버 기준 없음 (hover_align.py ref {color} [--src newcam --wall x,y])"
     t = st()["tcp"]; z, rz = t[2], t[5]
@@ -413,19 +415,31 @@ def check(color, srcs=None):
         per[src] = D
         last[src] = {"wall": meas["wall"], "pillars": meas["pillars"], "tcp": t, "z": z}
     promote_ref.last[color] = last
-    # 결합: XY 평균(불일치 게이트), rz 는 점 2개 카메라 우선
-    xs = [D["dmm"] for D in per.values()]
-    keys = list(per)
-    for i in range(len(keys)):
-        for j in range(i + 1, len(keys)):
-            A, B_ = per[keys[i]], per[keys[j]]
-            dd = math.dist(A["dmm"], B_["dmm"]); da = abs(HG.wrap_deg(A["drz"] - B_["drz"]))
-            if dd > COMBINE_TOL_MM or (not A["one_dot"] and not B_["one_dot"] and da > COMBINE_TOL_DEG):
-                return None, per, f"카메라 불일치({keys[i]}↔{keys[j]}) XY {dd:.2f}mm rz {da:.2f}° — 매핑/기준 의심, 정지"
+    # 결합: XY 평균(불일치 게이트), rz 는 점 2개 카메라 우선 — roles 가 있으면 역할별로
+    xy_keys = [k for k in per if roles.get(k, "both") in ("xy", "both")]
+    rz_keys = [k for k in per if roles.get(k, "both") in ("rz", "both")]
+    if not xy_keys:
+        return None, per, "XY 담당 카메라 없음(roles)"
+    for i in range(len(xy_keys)):
+        for j in range(i + 1, len(xy_keys)):
+            A, B_ = per[xy_keys[i]], per[xy_keys[j]]
+            dd = math.dist(A["dmm"], B_["dmm"])
+            if dd > COMBINE_TOL_MM:
+                return None, per, f"카메라 불일치({xy_keys[i]}↔{xy_keys[j]}) XY {dd:.2f}mm — 매핑/기준 의심, 정지"
+    xs = [per[k]["dmm"] for k in xy_keys]
     mx = sum(v[0] for v in xs) / len(xs); my = sum(v[1] for v in xs) / len(xs)
-    two = [D for D in per.values() if not D["one_dot"]]
-    drz = (sum(D["drz"] for D in two) / len(two)) if two else per[srcs[0]]["drz"]
-    return {"dmm": (mx, my), "drz": drz, "n_src": len(per), "rz_from": "2점" if two else "1점(−θ 가정)"}, per, None
+    two = [per[k] for k in rz_keys if not per[k]["one_dot"]]
+    if len(two) >= 2:
+        da = max(abs(HG.wrap_deg(a["drz"] - b["drz"])) for a in two for b in two)
+        if da > COMBINE_TOL_DEG:
+            return None, per, f"카메라 rz 불일치 {da:.2f}° — 매핑/기준 의심, 정지"
+    if two:
+        drz = sum(D["drz"] for D in two) / len(two); rz_from = "2점(" + ",".join(D["src"] for D in two) + ")"
+    elif rz_keys:
+        drz = per[rz_keys[0]]["drz"]; rz_from = f"1점 {rz_keys[0]}(−θ 가정)"
+    else:
+        drz = per[xy_keys[0]]["drz"]; rz_from = f"1점 {xy_keys[0]}(−θ 가정)"
+    return {"dmm": (mx, my), "drz": drz, "n_src": len(xy_keys), "rz_from": rz_from}, per, None
 
 
 def fmt(D):
@@ -434,12 +448,12 @@ def fmt(D):
             f"(특징 {len(D['matched'])} s={D['sim']['s']:.3f} θ={D['sim']['theta']:+.2f}° rms {D['sim']['rms']:.1f}px {D['scale_mm_px']:.3f}mm/px)")
 
 
-def align(color, dry=False, tol_mm=TOL_MM, tol_deg=TOL_DEG, srcs=None):
-    """보정 루프. 수렴 True / dry False / 실패 예외(호출자가 정지·보고). srcs 로 카메라 지정(예: ("newcam",))."""
+def align(color, dry=False, tol_mm=TOL_MM, tol_deg=TOL_DEG, srcs=None, roles=None):
+    """보정 루프. 수렴 True / dry False / 실패 예외(호출자가 정지·보고). srcs 로 카메라 지정, roles 로 역할(xy/rz/both/measure)."""
     prev = None
     check.expo_done = False
     for it in range(MAX_ITER):
-        C, per, why = check(color, srcs)
+        C, per, why = check(color, srcs, roles)
         for D in per.values():
             print(f"  호버정렬 {it}: {fmt(D)}", flush=True)
         if C is None:
