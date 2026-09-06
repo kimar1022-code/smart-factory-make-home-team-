@@ -668,9 +668,18 @@ def descend_monitored(color, x, y, rot, zs, g_close):
             if g.isdigit() and int(g) <= g_close and not cur:
                 raise RuntimeError(f"벽 놓침(그리퍼 {g}, 벽 점 없음)")
             if cur:
-                c = (sum(p[0] for p in cur) / len(cur), sum(p[1] for p in cur) / len(cur))
-                d = math.hypot(c[0] - ref_c[0], c[1] - ref_c[1])
-                print(f"    그리퍼 {g} · 벽 점 이동 {d:.1f}px", flush=True)
+                # 15:35 실기: 점 하나가 잠깐 안 잡히면 무게중심이 200px 튀어 '막힘 187px' 오판 → 점별 최근접 매칭 이동량(≤60px)으로.
+                ds = []
+                for q in cur:
+                    r0 = min(ref, key=lambda r: math.hypot(q[0] - r[0], q[1] - r[1]))
+                    dq = math.hypot(q[0] - r0[0], q[1] - r0[1])
+                    if dq <= 60.0:
+                        ds.append(dq)
+                if not ds:
+                    print(f"    그리퍼 {g} · 벽 점 {len(cur)}개가 기준 근처(60px)에 없음 → 정지", flush=True)
+                    raise RuntimeError("막힘 감시 불가(벽 점이 기준 자리에서 사라짐)")
+                d = max(ds)
+                print(f"    그리퍼 {g} · 벽 점 이동 {d:.1f}px" + (f" (매칭 {len(ds)}/{len(ref)})" if len(ds) != len(ref) else ""), flush=True)
                 step = d - d_prev; d_prev = d
                 if step > JAM_STEP_PX or d > JAM_TOTAL_PX:
                     # ★9/5 실증: 채널 끝까지 내려간 뒤 마지막 1mm 에서 7.5px 밀림 = 밑동이 밑판에 닿은 '안착 접촉'.
