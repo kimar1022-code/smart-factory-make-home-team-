@@ -65,11 +65,16 @@ RACK_ANG_MAX = 3.0                              # 랙 위 벽 각 변화 상한(
 ARUCO_WARN_MM, ARUCO_WARN_DEG = 1.5, 0.3        # 고정 자 대비 카메라 복귀 오차 경고
 GRASP_GATE_MM, GRASP_GATE_DEG = PC.GRASP_GATE_MM, PC.GRASP_GATE_DEG   # 1.0 / 0.3
 PRECORR_MAX_MM = 1.0                            # 파지 편차 선보정 상한(부호 미검증 — 호버 정렬이 나머지를 흡수)
+PRECORR_RZ = False                              # 13:36·14:01 실기 2회: rz 선보정 −0.43° 를 사용자가 매번 정확히 되돌림(rz 180) → 끔
+SEAT_NEWCAM_TOL_PX = 12                         # 새카메라 안착 판정: 기둥 점이 안착 기준 자리에서 이 px 안이면 seated(≈2.5mm)
 SPD_MOVE, SPD_DESC, SPD_SEAT = PC.SPD_MOVE, PC.SPD_DESC, PC.SPD_SEAT   # 30 / 10 / 3
 ALIGN_GATE_MM, ALIGN_GATE_DEG = 0.5, 0.3        # ②하강 직전 TCP 가 정렬 완료 TCP 와 이만큼 안이어야(XY 거리 / rz)
 ALIGN_MAX_AGE_S = 15 * 60                       # ②정렬 완료 후 이 시간이 지나면 하강 거부(베이스가 움직였을 수 있음 → 재정렬)
 SLOT_HISTORY_MAX = 5                            # ③슬롯 기준 승격 시 보존하는 이전 값 개수
 RUN4_ORDER = ("blue", "yellow", "red", "red_s") # ④4벽 연속 순서
+# 13:53 실기 2회: 손목캠↔새카메라 불일치 2.1mm 반복. 사용자 육안 자리와 비교하면 새카메라가 두 번 다 가까웠음(rz 특히).
+#   손목캠은 든 벽 윗점이 프레임 가장자리(x≈1025)라 원근·죠 안 기울기에 민감 → 파랑은 새카메라 단독 정렬(손목캠은 참고 출력).
+ALIGN_SRCS = {"blue": ("newcam",)}                # 색별 정렬 카메라(없으면 가용 전부)
 
 
 # ------------------------------------------------------------------ 상태·로그
@@ -263,7 +268,11 @@ def slot_target(color, B, grasp=None):
         if n > PRECORR_MAX_MM:
             ac, al = ac * PRECORR_MAX_MM / n, al * PRECORR_MAX_MM / n
         cr, sr = math.cos(math.radians(rz)), math.sin(math.radians(rz))
-        tx -= cr * ac - sr * al; ty -= sr * ac + cr * al; rz = HG.wrap_deg(rz - da)
+        tx -= cr * ac - sr * al; ty -= sr * ac + cr * al
+        if PRECORR_RZ:
+            rz = HG.wrap_deg(rz - da)
+        else:
+            da = 0.0
         pre = (ac, al, da)
     T = {"x": tx, "y": ty, "rz": rz, "z_seat": seat[2], "dyaw": dyaw, "precorr": pre, "ref_made": ref["made"]}
     log(f"  목표 [{color}] x {tx:.2f} y {ty:.2f} rz {rz:+.2f} (베이스 Δyaw {dyaw:+.3f}°, 선보정 {pre[0]:+.2f}/{pre[1]:+.2f}mm {pre[2]:+.2f}°)")
@@ -343,7 +352,11 @@ def grasp_check(color, rack_dang, g_close, gr):
     with LOCK: S["grasp"] = G
     log(f"  파지 편차({info['how']}): 가로 {info['across_mm']:+.2f} 길이 {info['along_mm']:+.2f}mm 각 {info['dang']:+.2f}°")
     if abs(info["along_mm"]) > GRASP_GATE_MM or abs(info["across_mm"]) > GRASP_GATE_MM or abs(info["dang"]) > GRASP_GATE_DEG:
-        raise Gate(f"파지 편차 게이트 초과({GRASP_GATE_MM}mm/{GRASP_GATE_DEG}°) — 재파지는 사용자 판단")
+        # 13:27 실기: 위치 −0.1mm 인데 각 +0.44° 로 정지(랙 위 벽이 −0.55° 돌아 있고 파지 rz 180 고정). z440 정렬이 회전을 보정하므로
+        # 즉시 정지 대신 사용자 선택: [▶계속]=이 파지로 진행(z440 에서 보정) / [⛔중단]=정지(벽은 사용자가 랙으로).
+        wait_user(f"파지 편차 게이트 초과({GRASP_GATE_MM}mm/{GRASP_GATE_DEG}°): 가로 {info['across_mm']:+.2f} 길이 {info['along_mm']:+.2f}mm 각 {info['dang']:+.2f}° — "
+                  f"[▶계속]=이 파지로 진행(z440 정렬이 보정) / [⛔중단]=정지 후 재파지")
+        G["gate_override"] = True
     return G
 
 
@@ -362,7 +375,14 @@ def stage_carry_hover(color, T):
         wait_user(f"{color} z{zh:.0f} 기준 없음: 콘솔 조그로 육안 정렬 후 [z440 기준 저장] → 계속")
     A = {"done": False}
     try:
-        HA.align(color)                                            # 부품(가용 카메라 전부, 수렴/발산/불일치 게이트)
+        srcs = ALIGN_SRCS.get(color)
+        if srcs:
+            try:
+                _, per, _ = HA.check(color)                         # 참고: 전 카메라 측정치 로그
+                for D in per.values(): log(f"  (참고) {HA.fmt(D)}")
+            except Exception as ex: log(f"  (참고 측정 실패: {ex})")
+            log(f"  정렬 카메라: {srcs}")
+        HA.align(color, srcs=srcs)                             # 부품(지정 카메라, 수렴/발산/불일치 게이트)
         A["done"] = True
     finally:
         HA.restore_expo()
@@ -378,16 +398,39 @@ def descend_gate(color):
     """②하강 직전 게이트. 정렬 완료 상태 + 같은 색 + 정렬 후 15분 이내 + z 일치 + 정렬 TCP 와 XY/rz 일치."""
     with LOCK:
         T = S.get("target"); A = S.get("align"); col = S.get("color")
-    if not (T and A and A.get("done")):
-        raise Gate("하강 조건 미충족: 정렬 완료 상태가 아님")
+    cur0 = PC.st()["tcp"]
+    if not T:                                                   # 서버 재시작 등으로 목표가 없으면 슬롯 기준의 z_seat 만 가져온다(사용자 수동 정렬 전제)
+        ref = (jload(F["slot"]) or {}).get(color)
+        if not ref:
+            raise Gate(f"{color} 슬롯 기준 없음 — 하강 불가")
+        T = {"x": None, "y": None, "rz": None, "z_seat": ref["seat_tcp"][2], "user_fallback": True}
+        with LOCK: S["target"] = T; S["color"] = color
+        col = color
+        log(f"  목표 없음 → 슬롯 기준 z_seat {T['z_seat']:.1f} 만 사용(사용자 수동 정렬)")
+    if not (A and A.get("done")):
+        # 13:3x 실기: 카메라 불일치로 정렬이 안 돈 상태에서 사용자가 육안으로 맞춤 → 설계 3단계(사용자 허락 후 버튼 하강) 그대로,
+        # 지금 TCP 를 '사용자 정렬 완료' 로 간주. 단 z 는 z_seat+85 ±3 이어야.
+        if not (T["z_seat"] - 1.0 <= cur0[2] <= T["z_seat"] + 88.0):
+            raise Gate(f"정렬 상태 없음 + 지금 z{cur0[2]:.0f} 가 z{T['z_seat']+3:.0f}~{T['z_seat']+88:.0f} 밖 — 수동 정렬이면 z440(또는 채널 안)에서 누르세요")
+        A = {"done": True, "by": "user", "x": cur0[0], "y": cur0[1], "z": cur0[2], "rz": cur0[5], "made_t": time.time(), "made": time.strftime("%H:%M:%S")}
+        with LOCK: S["align"] = A
+        log(f"  정렬 상태 없음 → 사용자 수동 정렬 TCP ({cur0[0]:.2f},{cur0[1]:.2f}) rz{cur0[5]:+.2f} 를 정렬 완료로 간주")
+    if T.get("x") is not None:                                  # 계산 목표 대비 실제 하강 자리 차이를 항상 기록(반복되면 보정값 후보)
+        nd = (cur0[0] - T["x"], cur0[1] - T["y"], HG.wrap_deg(cur0[5] - T["rz"]))
+        rec = {"made": time.strftime("%Y-%m-%d %H:%M:%S"), "color": color, "by": A.get("by", "align"), "target": [T["x"], T["y"], T["rz"]],
+               "descend_tcp": [round(v, 3) for v in cur0], "descend_minus_target": [round(v, 3) for v in nd], "precorr": T.get("precorr"), "dyaw": T.get("dyaw")}
+        try:
+            open(os.path.join(STATE, "nudge_log.jsonl"), "a").write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except Exception: pass
+        log(f"  하강 자리 − 계산 목표: dx {nd[0]:+.2f} dy {nd[1]:+.2f} mm drz {nd[2]:+.2f}° ({A.get('by', 'align')}) → nudge_log")
     if col != color:
         raise Gate(f"하강 색 불일치: 정렬된 벽은 {col}, 요청은 {color}")
     age = time.time() - float(A.get("made_t") or 0.0)
     if age > ALIGN_MAX_AGE_S:
         raise Gate(f"정렬 후 {age/60:.0f}분 경과(> {ALIGN_MAX_AGE_S//60}분) — 베이스가 움직였을 수 있음, 사이클 다시(재정렬)")
     cur = PC.st()["tcp"]
-    if abs(cur[2] - (T["z_seat"] + 85.0)) > 3.0:
-        raise Gate(f"지금 z{cur[2]:.0f} ≠ z{T['z_seat']+85:.0f} — 정렬 후 움직였음, 사이클 다시")
+    if not (T["z_seat"] - 1.0 <= cur[2] <= T["z_seat"] + 88.0):        # 막힘 후퇴 뒤 재하강·안착 높이(사용자 조그) 허용: z_seat−1 ~ +88
+        raise Gate(f"지금 z{cur[2]:.0f} 가 z{T['z_seat']+3:.0f}~{T['z_seat']+88:.0f} 밖 — 정렬 후 움직였음, 사이클 다시")
     dxy = math.hypot(cur[0] - A["x"], cur[1] - A["y"]); drz = abs(HG.wrap_deg(cur[5] - A["rz"]))
     if dxy > ALIGN_GATE_MM or drz > ALIGN_GATE_DEG:
         raise Gate(f"정렬 TCP 와 불일치 ΔXY {dxy:.2f}mm Δrz {drz:.2f}° (허용 {ALIGN_GATE_MM}mm/{ALIGN_GATE_DEG}°) — 정렬 후 움직였음, 사이클 다시")
@@ -395,14 +438,42 @@ def descend_gate(color):
     return T, A, cur
 
 
-def seat_check():
-    """안착 판정 부품(seat_verify). 실패해도 예외 대신 unknown. JSON 에 못 담는 '_' 키(이미지 등)는 버림."""
+def seat_check(color=None):
+    """안착 판정. ①seat_verify(손목캠 밑판 사각형 — z355 에선 원리적으로 못 봄, 14:03 실기 2회 unknown)
+    ②새카메라: 안착 기준 사진(pose_refs/<색>.json seat.cams.newcam.dots, 12:35 사용자 손 안착)의 기둥 점 자리와 지금 기둥 점 비교.
+    카메라가 손목에 붙어 있으므로 '안착 TCP ↔ 베이스' 관계가 맞으면 기둥이 같은 px 에 온다. 실패해도 예외 대신 unknown."""
     try:
         import seat_verify as SV
         seat = SV.verify()
     except Exception as ex:
         seat = {"state": "unknown", "why": str(ex)}
-    return {k: v for k, v in (seat or {}).items() if not str(k).startswith("_")}
+    seat = {k: v for k, v in (seat or {}).items() if not str(k).startswith("_")}
+    if str(seat.get("state", "")).startswith("seated") or not color:
+        return seat
+    try:
+        pr = jload(os.path.join(STATE, "pose_refs", f"{color}.json")) or {}
+        dots = (((pr.get("seat") or {}).get("cams") or {}).get("newcam") or {}).get("dots") or {}
+        wall_c = "red" if color == "red_s" else color
+        refs = [(c, p[0], p[1]) for c, lst in dots.items() if c != wall_c for p in (lst or []) if len(p) >= 2]
+        if not refs:
+            seat["why"] = str(seat.get("why")) + " | 새카메라 안착 기준 없음"; return seat
+        img = HA.grab("newcam")
+        res = []
+        for c, rx, ry in refs:
+            now = HA._blobs(img, c, 20, "newcam")
+            cand = [q for q in now if math.hypot(q[0] - rx, q[1] - ry) <= 60]
+            if cand:
+                q = min(cand, key=lambda q: math.hypot(q[0] - rx, q[1] - ry)); res.append((c, round(rx), round(ry), round(q[0]), round(q[1]), math.hypot(q[0] - rx, q[1] - ry)))
+        if not res:
+            seat["why"] = str(seat.get("why")) + f" | 새카메라: 기준 기둥 {[(c, round(x), round(y)) for c, x, y in refs]} 근처(60px)에 점 없음"; return seat
+        worst = max(r[5] for r in res)
+        desc = " ".join(f"{c}({rx},{ry})→({x},{y}) {d:.1f}px" for c, rx, ry, x, y, d in res)
+        if worst <= SEAT_NEWCAM_TOL_PX:
+            return {"state": "seated_newcam", "why": f"새카메라 기둥 점이 안착 기준 자리와 일치: {desc} (허용 {SEAT_NEWCAM_TOL_PX}px)", "px": worst}
+        return {"state": "unknown", "why": f"새카메라 기둥 점이 안착 기준에서 {worst:.1f}px (> {SEAT_NEWCAM_TOL_PX}): {desc}", "px": worst}
+    except Exception as ex:
+        seat["why"] = str(seat.get("why")) + f" | 새카메라 판정 실패: {ex}"
+        return seat
 
 
 def promote_slot_ref(color, seat_tcp, B, note="자동 승격: 안착 성공 TCP + 이번 사이클 베이스"):
@@ -438,7 +509,7 @@ def stage_descend(color):
     rr = (jload(F["rack"]) or {}).get(color) or {}
     PC.descend_monitored(color, cur[0], cur[1], [180.0, 0.0, cur[5]], T["z_seat"], rr.get("grip_close", 13))   # 부품(3mm 단계·벽점 밀림·놓침·정체 → stop+25mm)
     set_stage("3 SEAT CHECK", color=color)
-    seat = seat_check()
+    seat = seat_check(color)
     seated = str(seat.get("state", "")).startswith("seated")
     with LOCK: S["seat"] = seat
     log(f"  안착 판정: {seat}")
@@ -460,6 +531,52 @@ def stage_descend(color):
     return seated
 
 
+def stage_descend_reteach(color):
+    """③' 하강 → 안착 판정 → seated 면 **든 채로** z_seat+85 로 올려 z440 기준(손목·새카메라)을 이 자리에서 재촬영 → 다시 내려 놓고 상승.
+    13:4x 사용자 지시: 정렬 루프가 안 돈 채 사용자가 육안으로 맞춘 자리 → 성공하면 그 관계를 기준 사진으로 박아 다음부터 카메라가 재현."""
+    T, A, cur = descend_gate(color)
+    rr = (jload(F["rack"]) or {}).get(color) or {}
+    if cur[2] <= T["z_seat"] + 2.0:
+        log(f"  이미 안착 높이 z{cur[2]:.1f}(사용자 조그) → 하강 생략, 안착 판정부터")
+    else:
+        set_stage("3 DESCEND", color=color)
+        PC.descend_monitored(color, cur[0], cur[1], [180.0, 0.0, cur[5]], T["z_seat"], rr.get("grip_close", 13))
+    set_stage("3 SEAT CHECK", color=color)
+    seat = seat_check(color)
+    seated = str(seat.get("state", "")).startswith("seated")
+    with LOCK: S["seat"] = seat
+    log(f"  안착 판정: {seat}")
+    if not seated:
+        set_stage("SEAT FAIL", color=color)
+        log(f"🛑 안착 미확인({seat.get('state')}: {seat.get('why')}) — 그리퍼 유지, 그 자리 정지. "
+            "[⛔중단]=정지 / [▶계속]=사용자가 안착 육안 확인 → 이 자리를 성공으로 간주하고 기준 재촬영 진행")
+        wait_user("SEAT FAIL — 그리퍼 유지: [⛔중단] 또는 [▶계속](안착 육안 확인 시 → 기준 재촬영)")
+        log("  사용자 [▶계속]: 안착 육안 확인 → 기준 재촬영 진행")
+        with LOCK: S["seat"] = dict(seat, user_override=True)
+    at = PC.st()["tcp"]
+    with LOCK: B = S.get("base")
+    if not B:
+        B = jload(F["base_last"]); log(f"  베이스: base_last({(B or {}).get('made')}) 사용")
+    seat_tcp = [at[0], at[1], T["z_seat"], at[3], at[4], at[5]]
+    promote_slot_ref(color, seat_tcp, B, note="사용자 육안 정렬 자리에서 안착 성공 → 슬롯 기준 갱신")
+    _pending_seat[color] = list(seat_tcp); jsave(_PENDING_F, _pending_seat)
+    set_stage("3' RETEACH z440", color=color)
+    zh = T["z_seat"] + 85.0
+    PC.speed(SPD_SEAT); move([at[0], at[1], zh] + list(at[3:]), tag=f"든 채 z{zh:.0f} (기준 재촬영)")
+    time.sleep(0.8)
+    for src in ("wrist", "newcam"):
+        try:
+            teach_hover(color, src)
+        except Exception as ex:
+            log(f"  ⚠ z440 기준 재촬영 실패 [{src}]: {ex}")
+    set_stage("3' RE-DESCEND", color=color)
+    PC.descend_monitored(color, at[0], at[1], [180.0, 0.0, at[5]], T["z_seat"], rr.get("grip_close", 13))
+    seat2 = seat_check(color); log(f"  재안착 판정: {seat2}")
+    release_and_rise(color, rr)
+    set_stage("DONE (기준 재촬영)", color=color)
+    return True
+
+
 # ------------------------------------------------------------------ 사이클
 def run_cycle(color, teach_rack=False):
     global _logf
@@ -474,6 +591,67 @@ def run_cycle(color, teach_rack=False):
     G = stage_rack(color, teach_rack)
     T = slot_target(color, B, G)
     stage_carry_hover(color, T)
+    set_stage("WAIT DESCEND", wait="[⬇ 하강] 버튼 (x·y·yaw 확인 후)", color=color)
+
+
+def run_held(color):
+    """든 채로 3단계부터(13:27 실기: 파지 게이트 정지 후 사용자 '잘 잡았다' → 재파지 없이 운반·z440 정렬·하강 대기).
+    필요: 이번 사이클 베이스(base_last, 20분 이내) + 파지 편차(메모리 S 또는 재시작 전 저장한 last_state) + 그리퍼가 벽을 물고 있음."""
+    with LOCK:
+        G = S.get("grasp"); S.update(color=color, err=None, target=None, align=None, seat=None)
+    if not G:
+        ls = jload(os.path.join(STATE, "last_state_1327.json")) or {}
+        G = ls.get("grasp"); log(f"  파지 편차: 재시작 전 저장분 사용 {G}")
+    if not G:
+        raise Gate("파지 편차 기록 없음 — [▶사이클] 로 처음부터")
+    B = jload(F["base_last"])
+    if not B:
+        raise Gate("베이스 측정 없음 — [▶사이클] 로 처음부터")
+    age = time.time() - time.mktime(time.strptime(B["made"], "%Y-%m-%d %H:%M:%S"))
+    if age > 20 * 60:
+        raise Gate(f"베이스 측정이 {age/60:.0f}분 전 — [▶사이클] 로 처음부터(빈손 재측정)")
+    rr = (jload(F["rack"]) or {}).get(color) or {}
+    g = PC.grip_read()
+    if g.isdigit() and int(g) <= rr.get("grip_close", 13):
+        raise Gate(f"그리퍼 {g} ≤ 닫힘값 — 벽을 물고 있지 않음")
+    with LOCK: S["base"] = B; S["grasp"] = G
+    log(f"══ 든 채로 3단계부터 [{color}]: 베이스 {B['made']} 파지 편차 가로 {G['across_mm']:+.2f} 길이 {G['along_mm']:+.2f} 각 {G['dang']:+.2f}°")
+    T = slot_target(color, B, G)
+    stage_carry_hover(color, T)
+    set_stage("WAIT DESCEND", wait="[⬇ 하강] 버튼 (x·y·yaw 확인 후)", color=color)
+
+
+def align_here(color):
+    """든 채 z440 근처(±12)에서 정렬만 다시(SAFE 왕복 없음): z_seat+85 로 수직 이동 → ALIGN_SRCS 카메라로 정렬 → WAIT DESCEND."""
+    ref = (jload(F["slot"]) or {}).get(color)
+    if not ref:
+        raise Gate(f"{color} 슬롯 기준 없음")
+    zs = ref["seat_tcp"][2]; zh = zs + 85.0
+    cur = PC.st()["tcp"]
+    if abs(cur[2] - zh) > 12.0:
+        raise Gate(f"지금 z{cur[2]:.0f} — z{zh:.0f}±12 에서만(든 채)")
+    g = PC.grip_read(); rr = (jload(F["rack"]) or {}).get(color) or {}
+    if g.isdigit() and int(g) <= rr.get("grip_close", 13):
+        raise Gate(f"그리퍼 {g} ≤ 닫힘값 — 벽을 물고 있지 않음")
+    with LOCK:
+        S.update(color=color, err=None, align=None, seat=None)
+        if not S.get("target"):
+            S["target"] = {"x": None, "y": None, "rz": None, "z_seat": zs, "user_fallback": True}
+    set_stage("2' HOVER ALIGN(재)", color=color)
+    PC.speed(SPD_SEAT); move([cur[0], cur[1], zh] + list(cur[3:]), tag=f"z{zh:.0f}")
+    A = {"done": False}
+    with LOCK: S["align"] = A
+    srcs = ALIGN_SRCS.get(color)
+    try:
+        _, per, _ = HA.check(color)
+        for D in per.values(): log(f"  (참고) {HA.fmt(D)}")
+    except Exception as ex: log(f"  (참고 측정 실패: {ex})")
+    log(f"  정렬 카메라: {srcs or '가용 전부'}")
+    HA.align(color, srcs=srcs)
+    c = PC.st()["tcp"]
+    A.update(done=True, x=c[0], y=c[1], rz=c[5], z=c[2], made_t=time.time(), made=time.strftime("%H:%M:%S"), by="align")
+    with LOCK: S["align"] = A
+    log(f"  ✅ 정렬 완료 TCP ({c[0]:.2f},{c[1]:.2f}) rz{c[5]:+.2f}")
     set_stage("WAIT DESCEND", wait="[⬇ 하강] 버튼 (x·y·yaw 확인 후)", color=color)
 
 
@@ -520,6 +698,9 @@ def teach_slot_base(color):
     seat = _pending_seat.get(color)
     if not seat:
         raise Gate("먼저 [슬롯 기준 1/2] 로 안착 TCP 를 저장")
+    cur = PC.st()["tcp"]
+    if max(abs(cur[i] - OBS[i]) for i in range(3)) > 2.0:      # 13:16 사고: 관측자세 밖에서 ArUco 기준을 찍어 자가 41mm/축척 0.885 로 어긋남 → 베이스 rms 12.6mm
+        goto_obs()
     if not os.path.exists(F["aruco"]):
         m, why = BT.markers()
         if m and len(m) >= 3:
@@ -624,7 +805,10 @@ def worker():
         try:
             ABORT.clear()
             if op == "start": run_cycle(arg["color"], arg.get("teach_rack", False))
+            elif op == "resume_held": run_held(arg["color"])
+            elif op == "align_here": align_here(arg["color"])
             elif op == "descend": stage_descend(arg["color"])
+            elif op == "descend_reteach": stage_descend_reteach(arg["color"])
             elif op == "goto_obs": set_stage("GOTO OBS"); goto_obs(); set_stage("IDLE")
             elif op == "slot2": set_stage("TEACH SLOT 2/2"); teach_slot_base(arg["color"]); set_stage("IDLE")
             elif op == "slot_both": teach_slot_both(arg["color"]); set_stage("IDLE")
@@ -663,7 +847,7 @@ def handle_cmd(q):
         r4 = S.get("run4"); in_run4_wait = bool(r4 and r4.get("active") and S.get("stage") == "WAIT DESCEND" and S.get("wait"))
     if op == "descend" and in_run4_wait:                             # ④run4 는 워커가 점유 중 → 하강 버튼 = 계속
         RESUME.set(); return {"ok": True, "note": "run4: 하강 진행"}
-    if op in ("start", "descend", "goto_obs", "slot2", "probe", "run4", "slot_both"):
+    if op in ("start", "descend", "goto_obs", "slot2", "probe", "run4", "slot_both", "resume_held", "descend_reteach", "align_here"):
         if S["busy"]:
             return {"ok": False, "err": "실행 중 — 먼저 중단"}
         order = [c for c in (q.get("order", [""])[0] or "").split(",") if c] or list(RUN4_ORDER)
@@ -710,8 +894,11 @@ pre{background:#000;padding:8px;height:260px;overflow:auto;font-size:12px}table{
 <div>색: <select id=color><option>blue<option>yellow<option>red<option>red_s</select>
  <button class=big onclick="cmd('start')">▶ 사이클(1→2→2')</button>
  <button onclick="cmd('start',{teach:1})">▶ 사이클 + 랙 파지 티칭</button>
+ <button onclick="cmd('resume_held')">▶ 든 채로 3단계부터(운반→z440 정렬→하강 대기)</button>
+ <button onclick="cmd('align_here')">▶ 여기서 정렬만 다시(z440, 든 채)</button>
  <button class=big onclick="if(confirm('4벽 연속 blue→yellow→red→red_s? 벽마다 빈손 베이스 재측정, 하강은 매번 [⬇ 하강] 버튼'))cmd('run4')">▶ 4벽 연속(run4)</button>
  <button class=big id=desc onclick="if(confirm('수직 하강? x·y·yaw 확인했나'))cmd('descend')">⬇ 하강(3)</button>
+ <button onclick="if(confirm('하강 → 안착 성공 시 든 채로 z440 올려 기준 재촬영 → 재하강·놓기?'))cmd('descend_reteach')">⬇ 하강+성공 시 z440 기준 재촬영</button>
  <button class=big style="background:#a00;color:#fff" onclick="cmd('abort')">⛔ 중단</button>
  <button onclick="cmd('resume')">▶ 계속</button>
  <button onclick="cmd('goto_obs')">관측자세로</button></div>
@@ -735,7 +922,7 @@ async function poll(){try{const s=await fetch('/state').then(r=>r.json());
  $('stage').style.color=s.stage.startsWith('SEAT FAIL')?'#f66':'';$('wait').textContent=s.wait?'⏸ '+s.wait:'';
  $('tcp').textContent=s.tcp?`tcp ${s.tcp.slice(0,3).join(',')} rz${s.tcp[5]} grip ${s.grip}${s.frozen?' ❄FROZEN':''}`:'브리지 없음';
  $('gates').innerHTML=Object.entries(s.gates).map(([k,v])=>`<div class=${v?'ok':'no'}>${v?'✔':'✘'} ${k}</div>`).join('');
- const allok=Object.values(s.gates).every(Boolean)&&s.stage==='WAIT DESCEND';$('desc').disabled=!allok;$('desc').style.opacity=allok?1:.4;
+ const allok=(Object.values(s.gates).every(Boolean)&&s.stage==='WAIT DESCEND')||((s.stage==='IDLE'||s.stage==='STOPPED')&&!s.busy&&s.tcp&&s.tcp[2]>=354&&s.tcp[2]<=443);$('desc').disabled=!allok;$('desc').style.opacity=allok?1:.4;  // 13:38: 사용자 수동 정렬(z440±3, IDLE/STOPPED)도 하강 허용 — 서버 게이트가 최종
  $('refs').innerHTML='<table><tr><th>색<th>슬롯<th>랙보정<th>서명<th>z440</tr>'+Object.entries(s.refs).map(([c,r])=>`<tr><td>${c}<td>${r.slot?'✔':'✘'}<td>${r.rack_offset?'✔':(r.rack?'seed':'✘')}<td>${r.sig?'✔':'✘'}<td>${r.hover.join('/')||'✘'}`).join('')+'</table>'
   +`<div>매핑 newcam ${s.maps.newcam?'✔':'✘'} · side ${s.maps.side?'✔':'✘'} · ArUco기준 ${s.maps.aruco_ref?'✔':'✘'}</div>`;
  $('nums').innerHTML=`<div>베이스: ${f(s.base&&{x:s.base.x,y:s.base.y,yaw:s.base.yaw,rms:s.base.rms})}</div><div>랙: ${f(s.rack&&{len_px:s.rack.len_px,dang:s.rack.dang,xy:s.rack.grip_xy})}</div>
