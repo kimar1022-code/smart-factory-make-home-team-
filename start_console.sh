@@ -32,6 +32,10 @@ if ! pgrep -f "rack_view.p[y]" >/dev/null 2>&1; then
   nohup python3 "$HOME/bf2_console/tools/rack_view.py" > "$HOME/bf2_console/logs/rack_view.log" 2>&1 &
   echo "  랙 관측 뷰 기동(:8774)"
 fi
+if ! pgrep -f "house_cycle.p[y]" >/dev/null 2>&1; then
+  nohup python3 "$HOME/bf2_console/tools/house_cycle.py" > "$HOME/bf2_console/logs/house_cycle.log" 2>&1 &
+  echo "  ★9/6 재설계 사이클 서버 기동(:8776, 버튼: 티칭·사이클·하강·중단)"
+fi
 # ★9/5: 색점 노출 감시 — 조명이 변해 색이 무너지면 저장 설정으로 복원(관측자세일 때만 채점)
 if ! pgrep -f "color_lock.py monito[r]" >/dev/null 2>&1; then
   nohup python3 "$HOME/bf2_console/tools/color_lock.py" monitor 30 > "$HOME/bf2_console/logs/color_monitor.log" 2>&1 &

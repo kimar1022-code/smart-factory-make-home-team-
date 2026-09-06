@@ -1,0 +1,613 @@
+#!/usr/bin/env python3
+"""house_cycle.py — 조립식 주택 벽 삽입 사이클 (9/6 재설계, 사용자 설계 4단계 + 버튼)  :8776
+
+설계(사용자, 9/6 11:2x):
+  1. base above(관측자세 z650, 빈 손): ArUco(고정 자) 대비 기둥 4점이 얼마나 움직였나 → 곧 꽂을 벽의 자리(x, y, yaw).
+  2. rack above: 그 벽의 양끝점 → 중앙에 그리퍼(벌림 30) → 벽별 보정(사용자 버튼으로 기억) → z 하강 → 파지
+     → 든 벽의 색점 기록(좋은 파지 서명과 비교해 편차를 3단계에 반영).
+  2'. 1 의 자리로 운반 → z_seat+85(=z440) → 기둥점↔벽점 관계를 '잘 들어갔을 때' 기준과 비교, 다르면 맞춘다.
+  3. 사용자 허락 → 버튼으로 수직 하강(막힘 감시). x·y·yaw 는 그 전에 다 맞아 있어야 한다.
+
+원칙: 상태 파일은 state/house/ 에 새로(옛 golden/anchor/ref 안 읽음). 검출기·하강감시·호버정렬은 어제 실기 검증된 부품을 그대로 쓴다.
+      어떤 예외든 stop 이 먼저. 기둥 꼭대기 아래(z_seat+85 미만)에서 XY·rz 이동 금지. 자동 재시도 없음(정지·보고, 사용자 판단).
+      랙 위 벽은 항상 같은 방향으로 놓는다(사용자 결정) → 벽별 보정 부호가 유지된다.
+
+버튼(벽별): 슬롯 기준 저장(1/2 안착 TCP, 2/2 관측 페어링) · 랙 보정 저장 · 좋은 파지 서명 저장 · z440 기준 저장 · 고정캠 매핑(newcam/side)
+동작:  ▶ 사이클(1→2→2' 자동, 필요한 기준이 없으면 그 자리에서 멈추고 버튼을 기다림) · ⬇ 하강 · ⛔ 중단 · 관측자세로
+
+  python3 house_cycle.py            # 서버 :8776  (http://<ip>:8776/)
+"""
+import sys, os, json, math, time, threading, queue, traceback
+import urllib.request as UR
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
+import numpy as np
+
+sys.path.insert(0, "/home/ar/bf2_console/tools")
+import place_calc as PC          # 부품: find_base_4pts / rack_ends / _grip_ok / grasp_measure / save_grasp_sig_now / descend_monitored / held_wall_dots
+import hover_align as HA         # 부품: align / save_ref / promote_ref / probe_fixed / wall_dots / grab
+import house_geometry as HG
+import slot_target as STG        # 부품: pillars_px / base_pose_robot / load_map
+import base_twist as BT          # 부품: markers / board_frame_transform / apply_sim  (ArUco 고정 자)
+
+STATE = os.environ.get("HOUSE_STATE", "/home/ar/bf2_console/state/house")
+os.makedirs(os.path.join(STATE, "logs"), exist_ok=True)
+F = {k: os.path.join(STATE, v) for k, v in {
+    "slot": "slot_ref.json",        # 색별 {seat_tcp, base(x,y,yaw 로컬), made}
+    "rack": "rack_ref.json",        # 색별 {Pc0, Tg0, ang0, len0_px, z_pick, grip_open, grip_close, offset{along,across}}
+    "rack_map": "rack_map.json",    # 랙 관측자세 화면→로봇 Jinv(mm/px)
+    "rack_pose": "rack_pose.json",  # 랙 관측자세 TCP
+    "sig": "grasp_sig.json",        # 좋은 파지 서명(place_calc by_color 스키마)
+    "hover": "hover_ref.json",      # z440 기준 관계(hover_align 스키마)
+    "aruco": "aruco_ref.json",      # 관측자세 ArUco 기준 코너
+    "base_last": "base_last.json",
+}.items()}
+PC.GRASP_REF = F["sig"]            # ★부품이 새 상태 파일을 보게 전환(옛 grasp_ref_0905/hover_ref_0905 안 읽음)
+HA.REF = F["hover"]
+
+PORT = 8776
+OBS = PC.OBS                                    # [200,-330,650,180,0,180]
+SAFE_Z = PC.SAFE_Z                              # 650
+HOVER_Z = PC.HOVER_Z                            # 478
+COLORS = ("blue", "yellow", "red", "red_s")
+GRIP_OPEN = 30                                  # 사용자 설계: 벌림 30 으로 내려온다
+RACK_RZ_FOLLOW = False                          # 랙 위 벽 각을 rz 로 따라갈지(부호 미검증 → 기본 끔, 각은 보고만)
+RACK_ANG_MAX = 3.0                              # 랙 위 벽 각 변화 상한(넘으면 벽이 삐뚤게 놓인 것 → 정지)
+ARUCO_WARN_MM, ARUCO_WARN_DEG = 1.5, 0.3        # 고정 자 대비 카메라 복귀 오차 경고
+GRASP_GATE_MM, GRASP_GATE_DEG = PC.GRASP_GATE_MM, PC.GRASP_GATE_DEG   # 1.0 / 0.3
+PRECORR_MAX_MM = 1.0                            # 파지 편차 선보정 상한(부호 미검증 — 호버 정렬이 나머지를 흡수)
+SPD_MOVE, SPD_DESC, SPD_SEAT = PC.SPD_MOVE, PC.SPD_DESC, PC.SPD_SEAT   # 30 / 10 / 3
+
+
+# ------------------------------------------------------------------ 상태·로그
+class Abort(Exception): pass
+class Gate(Exception): pass
+
+LOCK = threading.Lock()
+ABORT = threading.Event()
+RESUME = threading.Event()
+S = {"stage": "IDLE", "color": None, "busy": False, "wait": None, "log": [], "err": None,
+     "base": None, "rack": None, "grasp": None, "target": None, "align": None, "seat": None,
+     "gates": {}, "tcp": None, "grip": None, "made": time.strftime("%H:%M:%S")}
+_logf = None
+
+
+def log(msg):
+    line = f"{time.strftime('%H:%M:%S')} {msg}"
+    print(line, flush=True)
+    with LOCK:
+        S["log"].append(line); S["log"] = S["log"][-300:]
+    if _logf:
+        _logf.write(line + "\n"); _logf.flush()
+
+
+def set_stage(stage, wait=None, **kw):
+    with LOCK:
+        S["stage"] = stage; S["wait"] = wait; S.update(kw)
+    log(f"── {stage}" + (f" (대기: {wait})" if wait else ""))
+
+
+def jload(path, default=None):
+    return json.load(open(path)) if os.path.exists(path) else default
+
+
+def jsave(path, d):
+    json.dump(d, open(path, "w"), ensure_ascii=False, indent=1)
+
+
+# ------------------------------------------------------------------ 로봇(중단 가능 이동) — 부품들이 이걸 쓰도록 주입
+def move(tcp, tol=0.6, timeout=60, tag=""):
+    if ABORT.is_set():
+        raise Abort()
+    r = PC.post("move_tcp", {"tcp": tcp, "dry_run": True})
+    if r.get("result") != "dry_run":
+        raise RuntimeError(f"{tag} dry_run 거부 {r}")
+    r = PC.post("move_tcp", {"tcp": tcp, "dry_run": False})
+    if r.get("result") not in ("started", "ok"):
+        raise RuntimeError(f"{tag} 이동 거부 {r}")
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        if ABORT.is_set():
+            PC.post("stop", {"dry_run": False}); raise Abort()
+        s = PC.st()
+        if s.get("frozen"):
+            raise RuntimeError(f"{tag} 동결")
+        c = s["tcp"]
+        if max(abs(c[i] - tcp[i]) for i in range(3)) <= tol and abs(HG.wrap_deg(c[5] - tcp[5])) <= 0.3 and not s["busy"]:
+            time.sleep(0.4)
+            log(f"  ✓ {tag} ({c[0]:.1f},{c[1]:.1f},{c[2]:.1f}) rz{c[5]:+.2f}")
+            return c
+        time.sleep(0.2)
+    raise RuntimeError(f"{tag} 미도달 목표{[round(v, 1) for v in tcp[:3]]} 현재{[round(v, 1) for v in PC.st()['tcp'][:3]]}")
+
+
+PC.move = move                                   # find_base_4pts / descend_monitored 등이 중단 가능 이동을 쓴다
+_ha_move_rel = HA.move_rel
+def _move_rel_guard(dx, dy, drz, tol=0.3, timeout=40):
+    if ABORT.is_set():
+        raise Abort()
+    return _ha_move_rel(dx, dy, drz, tol, timeout)
+HA.move_rel = _move_rel_guard
+
+
+def wait_user(what):
+    """버튼 대기. RESUME 또는 ABORT."""
+    RESUME.clear()
+    with LOCK:
+        S["wait"] = what
+    log(f"⏸ 사용자 대기: {what}")
+    while not RESUME.wait(0.2):
+        if ABORT.is_set():
+            raise Abort()
+    with LOCK:
+        S["wait"] = None
+
+
+def up_to_safe():
+    cur = PC.st()["tcp"]
+    if cur[2] < SAFE_Z - 1:
+        PC.speed(SPD_MOVE); move([cur[0], cur[1], SAFE_Z] + list(cur[3:]), tag="상승 SAFE")
+
+
+def goto_obs():
+    up_to_safe(); PC.speed(SPD_MOVE); move(OBS, tag="관측자세"); PC.speed(1)
+
+
+# ------------------------------------------------------------------ 씨앗(첫 기동 시 1회): 랙 자세·매핑·벽별 파지 z 는 로봇 자세 수준의 사실이라 가져온다
+def seed_state():
+    if not os.path.exists(F["rack_pose"]):
+        src = jload("/home/ar/bf2_console/rack_observe_pose.json")
+        if src: jsave(F["rack_pose"], dict(src, note="seed 9/5 rack_observe_pose")); log("seed: rack_pose")
+    if not os.path.exists(F["rack_map"]):
+        rc = jload("/home/ar/bf2_console/rack_calib.json") or {}
+        if rc.get("blue", {}).get("Jinv"):
+            jsave(F["rack_map"], {"Jinv_mm_per_px": rc["blue"]["Jinv"], "note": "seed 9/5 ±10mm probe @rack observe (0.322mm/px)"}); log("seed: rack_map")
+    if not os.path.exists(F["rack"]):
+        rc = jload("/home/ar/bf2_console/rack_calib.json") or {}
+        cal = (jload("/home/ar/bf2_console/dot_calib.json") or {}).get("refs", {})
+        pr = jload("/home/ar/bf2_console/pick_ref_0905.json") or {}
+        out = {}
+        for c in COLORS:
+            if c not in rc: continue
+            z = (pr.get(c) or {}).get("tcp", cal.get(c, {}).get("pick_tcp_taught", [0, 0, 342]))[2]
+            out[c] = {"Pc0": rc[c]["Pc0"], "Tg0": rc[c]["Tg0"], "ang0": rc[c]["ang0"], "len0_px": rc[c]["len0_px"],
+                      "z_pick": z, "grip_open": GRIP_OPEN, "grip_close": (pr.get(c) or {}).get("grip_close", cal.get(c, {}).get("grip_close", 13)),
+                      "offset": {"along": 0.0, "across": 0.0}, "note": "seed 9/5 사용자 시연 중앙(파랑·빨강·red_s)/taught(노랑) — 랙 보정 버튼으로 덮어씀"}
+        if out: jsave(F["rack"], out); log(f"seed: rack_ref {list(out)}")
+
+
+# ------------------------------------------------------------------ 1단계: 베이스(빈 손, ArUco 자 보정)
+def aruco_correct(px4):
+    """고정 ArUco 자로 카메라 복귀 오차를 상쇄한 기둥 px. 기준 없으면 저장만 제안, 마커 부족이면 미보정."""
+    m, why = BT.markers()
+    if m is None:
+        return px4, {"applied": False, "why": why}
+    ref = jload(F["aruco"])
+    if not ref:
+        return px4, {"applied": False, "why": "ArUco 기준 없음(슬롯 기준 2/2 저장 시 자동 생성)", "n": len(m)}
+    T, whyT = BT.board_frame_transform(m, {int(k): v for k, v in ref["markers"].items()})
+    if T is None:
+        return px4, {"applied": False, "why": whyT, "n": len(m)}
+    mmpx = 0.4135
+    shift_mm = math.hypot(T["tx"], T["ty"]) * mmpx; dth = math.degrees(T["th"]) if abs(T["th"]) < 6.3 else T["th"]
+    fixed = BT.apply_sim([(p[0], p[1]) for p in px4], T["s"], T["th"], T["tx"], T["ty"])
+    out = [(x, y) + tuple(p[2:]) for (x, y), p in zip(fixed, px4)]
+    info = {"applied": True, "ids": T["ids"], "rms_px": round(T["rms_px"], 2), "shift_mm": round(shift_mm, 2), "dth_deg": round(dth, 3), "s": round(T["s"], 4)}
+    if shift_mm > ARUCO_WARN_MM or abs(dth) > ARUCO_WARN_DEG:
+        log(f"  ⚠ ArUco 자: 카메라가 기준 대비 {shift_mm:.2f}mm/{dth:+.2f}° 벗어남 — 마운트/복귀 오차 의심(보정은 적용)")
+    return out, info
+
+
+def stage_base():
+    """관측자세 z650 빈 손 → 기둥 4점(탐색 포함) → ArUco 보정 → 베이스 자세(로컬 로봇축 mm, 원점=관측 화면중심)."""
+    set_stage("1 BASE")
+    cur = PC.st()["tcp"]
+    if max(abs(cur[i] - OBS[i]) for i in range(3)) > 2.0:
+        goto_obs()
+    Jinv, _mp = STG.load_map()
+    px4, dxy = PC.find_base_4pts(False)                       # 부품(건강게이트·노출사다리·탐색 이동 포함)
+    info = {"applied": False, "why": "탐색 이동으로 카메라가 관측자세를 벗어남 → 자 미적용"}
+    if abs(dxy[0]) + abs(dxy[1]) < 0.5:
+        px4, info = aruco_correct(px4)
+    pose, rms, _ = STG.base_pose_robot(px4, Jinv, (0.0, 0.0), (640.0, 360.0))
+    if abs(dxy[0]) + abs(dxy[1]) > 0.01:
+        pose = HG.Pose2D(pose.x + dxy[0], pose.y + dxy[1], pose.yaw_deg)
+    prev = jload(F["base_last"])
+    d = None
+    if prev:
+        d = (pose.x - prev["x"], pose.y - prev["y"], HG.wrap_deg(pose.yaw_deg - prev["yaw"]))
+        log(f"  베이스 이동(직전 {prev['made']} 대비): Δx {d[0]:+.2f} Δy {d[1]:+.2f} Δyaw {d[2]:+.3f}°")
+    B = {"x": pose.x, "y": pose.y, "yaw": pose.yaw_deg, "rms": rms, "aruco": info, "px4": [list(p) for p in px4],
+         "made": time.strftime("%Y-%m-%d %H:%M:%S"), "delta_prev": d}
+    jsave(F["base_last"], B)
+    log(f"  베이스 x {pose.x:.2f} y {pose.y:.2f} yaw {pose.yaw_deg:+.3f}° rms {rms:.2f}mm  ArUco {info}")
+    with LOCK: S["base"] = B
+    return B
+
+
+def slot_target(color, B, grasp=None):
+    """벽별 슬롯 기준(손 안착 TCP + 그때 베이스) 을 지금 베이스로 강체 이동 → 목표 (x, y, rz, z_seat).
+    파지 편차(있으면) 는 상한 PRECORR_MAX_MM 안에서 선보정(부호 미검증 — 호버 정렬이 최종)."""
+    ref = (jload(F["slot"]) or {}).get(color)
+    if not ref:
+        raise Gate(f"{color} 슬롯 기준 없음 — 손으로 안착 → 로봇으로 물고 '슬롯 기준 1/2' → 놓고 관측자세 → '슬롯 기준 2/2'")
+    br = ref["base"]; seat = ref["seat_tcp"]
+    dyaw = HG.wrap_deg(B["yaw"] - br["yaw"])
+    sx, sy = seat[0] - br["x"], seat[1] - br["y"]
+    c, s = math.cos(math.radians(dyaw)), math.sin(math.radians(dyaw))
+    tx, ty = B["x"] + c * sx - s * sy, B["y"] + s * sx + c * sy
+    rz = HG.wrap_deg(seat[5] + dyaw)
+    pre = (0.0, 0.0, 0.0)
+    if grasp and grasp.get("ok"):
+        ac, al, da = grasp["across_mm"], grasp["along_mm"], grasp["dang"]
+        n = math.hypot(ac, al)
+        if n > PRECORR_MAX_MM:
+            ac, al = ac * PRECORR_MAX_MM / n, al * PRECORR_MAX_MM / n
+        cr, sr = math.cos(math.radians(rz)), math.sin(math.radians(rz))
+        tx -= cr * ac - sr * al; ty -= sr * ac + cr * al; rz = HG.wrap_deg(rz - da)
+        pre = (ac, al, da)
+    T = {"x": tx, "y": ty, "rz": rz, "z_seat": seat[2], "dyaw": dyaw, "precorr": pre, "ref_made": ref["made"]}
+    log(f"  목표 [{color}] x {tx:.2f} y {ty:.2f} rz {rz:+.2f} (베이스 Δyaw {dyaw:+.3f}°, 선보정 {pre[0]:+.2f}/{pre[1]:+.2f}mm {pre[2]:+.2f}°)")
+    with LOCK: S["target"] = T
+    return T
+
+
+# ------------------------------------------------------------------ 2단계: 랙 양끝 → 중앙 → 벽별 보정 → 파지 → 서명 편차
+def rack_axes(e, Jinv):
+    """벽 축 단위벡터(로봇 프레임): along = p1→p2, across = 그 수직."""
+    u = np.array([e["p2"][0] - e["p1"][0], e["p2"][1] - e["p1"][1]], float)
+    u = Jinv @ u; u = u / (np.linalg.norm(u) + 1e-9)
+    return u, np.array([-u[1], u[0]])
+
+
+def stage_rack(color, teach_rack=False):
+    set_stage("2 RACK", color=color)
+    rr = (jload(F["rack"]) or {}).get(color)
+    if not rr:
+        raise Gate(f"{color} 랙 기준 없음")
+    Jinv = np.array(jload(F["rack_map"])["Jinv_mm_per_px"], float)
+    rp = jload(F["rack_pose"])["tcp"]
+    up_to_safe(); PC.speed(SPD_MOVE)
+    move([rp[0], rp[1], SAFE_Z, 180.0, 0.0, 180.0], tag="랙 위 SAFE")
+    log(f"  그리퍼 열기 → {PC.gripper(rr.get('grip_open', GRIP_OPEN))}")
+    move(rp, tag="랙 관측자세")
+    e = PC.rack_ends(color, x_hint=rr["Pc0"][0])                # 부품(4프레임, 같은 색 여러 벽이면 x 로 선택)
+    if not e:
+        raise Gate("랙에서 벽 양끝을 못 잡음 — 벽이 뒤집혔거나 점 가림. 랙에 다시 놓기")
+    L0 = rr["len0_px"]
+    if abs(e["len_px"] - L0) > 0.10 * L0:
+        raise Gate(f"벽 길이 불일치 {e['len_px']:.0f}px vs 기준 {L0:.0f}px ({(e['len_px']-L0)/L0*100:+.0f}%) — 끝점 미검출, 파지 금지")
+    dang = HG.wrap_deg(e["ang"] - rr["ang0"])
+    if abs(dang) > RACK_ANG_MAX:
+        raise Gate(f"랙 위 벽 각 변화 {dang:+.2f}° > {RACK_ANG_MAX}° — 벽이 삐뚤게 놓임")
+    dmm = Jinv @ np.array([e["mid"][0] - rr["Pc0"][0], e["mid"][1] - rr["Pc0"][1]])
+    gx, gy = rr["Tg0"][0] - dmm[0], rr["Tg0"][1] - dmm[1]         # 검증된 부호(rack_grip_xy 와 동일)
+    ua, ux = rack_axes(e, Jinv)
+    off = rr.get("offset") or {"along": 0.0, "across": 0.0}
+    gx += off["along"] * ua[0] + off["across"] * ux[0]
+    gy += off["along"] * ua[1] + off["across"] * ux[1]
+    rz = 180.0
+    if RACK_RZ_FOLLOW:
+        rz = HG.wrap_deg(180.0 + dang)
+    rot = [180.0, 0.0, rz]
+    R = {"mid": e["mid"], "len_px": e["len_px"], "ang": e["ang"], "dang": dang, "n_dots": e["n_dots"], "grip_xy": (gx, gy), "offset": off, "made": time.strftime("%H:%M:%S")}
+    with LOCK: S["rack"] = R
+    log(f"  랙: 중앙 ({e['mid'][0]:.0f},{e['mid'][1]:.0f}) 길이 {e['len_px']:.0f}px 각 {e['ang']:+.2f}°(Δ{dang:+.2f}) → 파지 XY ({gx:.2f},{gy:.2f}) 보정 along {off['along']:+.2f} across {off['across']:+.2f}")
+    zp = rr["z_pick"]
+    PC.speed(SPD_MOVE); move([gx, gy, rp[2]] + rot, tag="파지 XY 위")
+    PC.speed(SPD_DESC); move([gx, gy, zp + 40] + rot, tag="픽 −40")
+    PC.speed(SPD_SEAT); move([gx, gy, zp] + rot, tol=0.8, tag="픽 자세")
+    if teach_rack:
+        # 사용자 조그로 진짜 중앙 → '랙 보정 저장' 버튼(현재 TCP − 계산 TCP 를 벽 축으로 분해해 저장) → 계속
+        with LOCK: S["rack"]["calc_xy"] = (gx, gy); S["rack"]["axes"] = (ua.tolist(), ux.tolist())
+        wait_user("랙 파지 티칭: 그리퍼를 벽 진짜 중앙으로 조그한 뒤 [랙 보정 저장] → 계속")
+        cur = PC.st()["tcp"]; gx, gy = cur[0], cur[1]
+    g_close = rr["grip_close"]
+    gr = PC.gripper(g_close); log(f"  그리퍼 닫기 {g_close} → 실측 {gr}")
+    ok, why = PC._grip_ok(gr, g_close, color)                     # 부품(실측>닫힘 또는 손목캠 벽 점)
+    if not ok:
+        raise Gate("빈 파지 의심(" + why + ")")
+    log("  파지 판정 OK: " + why)
+    PC.speed(SPD_DESC); move([gx, gy, zp + 125] + rot, tag="들어올림")
+    log(f"  (참고) 들어올린 뒤 그리퍼 {PC.grip_read()}")
+    return grasp_check(color, dang, g_close, gr)
+
+
+def grasp_check(color, rack_dang, g_close, gr):
+    """든 벽 점 ↔ 좋은 파지 서명. 서명 없으면 사용자 확인 후 저장(버튼). 게이트 1.0mm/0.3°."""
+    if PC.load_grasp_ref(color) is None:
+        wait_user(f"{color} 좋은 파지 서명 없음: 파지가 정상이면 [파지 서명 저장] → 계속 (아니면 중단)")
+    g, info = PC.grasp_measure(color, rack_dang=rack_dang)      # 부품(2점/1점, 축척 핀홀 상수)
+    if g is None:
+        raise Gate("파지 편차 측정 불가: " + str(info))
+    G = {"ok": True, "across_mm": info["across_mm"], "along_mm": info["along_mm"], "dang": info["dang"], "how": info["how"], "grip": gr}
+    with LOCK: S["grasp"] = G
+    log(f"  파지 편차({info['how']}): 가로 {info['across_mm']:+.2f} 길이 {info['along_mm']:+.2f}mm 각 {info['dang']:+.2f}°")
+    if abs(info["along_mm"]) > GRASP_GATE_MM or abs(info["across_mm"]) > GRASP_GATE_MM or abs(info["dang"]) > GRASP_GATE_DEG:
+        raise Gate(f"파지 편차 게이트 초과({GRASP_GATE_MM}mm/{GRASP_GATE_DEG}°) — 재파지는 사용자 판단")
+    return G
+
+
+# ------------------------------------------------------------------ 2'단계: 운반 → z_seat+85 → 호버 정렬(기둥점↔벽점 기준 관계)
+def stage_carry_hover(color, T):
+    set_stage("2' CARRY", color=color)
+    rot = [180.0, 0.0, T["rz"]]
+    up_to_safe(); PC.speed(SPD_MOVE)
+    move([T["x"], T["y"], SAFE_Z] + rot, tag="목표 위 SAFE(rz 정렬)")
+    log(f"  (참고) 운반 후 그리퍼 {PC.grip_read()}")
+    PC.speed(SPD_DESC); move([T["x"], T["y"], HOVER_Z] + rot, tag="호버 z478")
+    zh = T["z_seat"] + 85.0
+    PC.speed(SPD_SEAT); move([T["x"], T["y"], zh] + rot, tag=f"기둥 위 z{zh:.0f}")
+    set_stage("2' HOVER ALIGN", color=color)
+    if HA.load_ref(color) is None:
+        wait_user(f"{color} z{zh:.0f} 기준 없음: 콘솔 조그로 육안 정렬 후 [z440 기준 저장] → 계속")
+    A = {"done": False}
+    try:
+        HA.align(color)                                            # 부품(가용 카메라 전부, 수렴/발산/불일치 게이트)
+        A["done"] = True
+    finally:
+        HA.restore_expo()
+    cur = PC.st()["tcp"]
+    A.update(x=cur[0], y=cur[1], rz=cur[5], z=cur[2])
+    with LOCK: S["align"] = A
+    log(f"  정렬 후 TCP x {cur[0]:.2f} y {cur[1]:.2f} rz {cur[5]:+.2f} z {cur[2]:.1f}")
+    return A
+
+
+# ------------------------------------------------------------------ 3단계: 사용자 버튼 하강(막힘 감시) → 안착 판정 → 놓기
+def stage_descend(color):
+    with LOCK:
+        T = S.get("target"); A = S.get("align")
+    if not (T and A and A.get("done")):
+        raise Gate("하강 조건 미충족: 정렬 완료 상태가 아님")
+    cur = PC.st()["tcp"]
+    if abs(cur[2] - (T["z_seat"] + 85.0)) > 3.0:
+        raise Gate(f"지금 z{cur[2]:.0f} ≠ z{T['z_seat']+85:.0f} — 정렬 후 움직였음, 사이클 다시")
+    set_stage("3 DESCEND", color=color)
+    rr = (jload(F["rack"]) or {}).get(color) or {}
+    PC.descend_monitored(color, cur[0], cur[1], [180.0, 0.0, cur[5]], T["z_seat"], rr.get("grip_close", 13))   # 부품(3mm 단계·벽점 밀림·놓침·정체 → stop+25mm)
+    set_stage("3 SEAT CHECK", color=color)
+    seat = {"state": "skipped"}
+    try:
+        import seat_verify as SV
+        seat = SV.verify()
+    except Exception as ex:
+        seat = {"state": "unknown", "why": str(ex)}
+    with LOCK: S["seat"] = seat
+    log(f"  안착 판정: {seat}")
+    HA.promote_ref(color)                                          # 성공 사이클 정렬 상태 → 다음 기준
+    set_stage("3 RELEASE", color=color)
+    log(f"  그리퍼 열기 → {PC.gripper(rr.get('grip_open', GRIP_OPEN))}")
+    cur = PC.st()["tcp"]
+    PC.speed(SPD_SEAT); move([cur[0], cur[1], cur[2] + 30] + list(cur[3:]), tag="수직 +30")
+    PC.speed(SPD_DESC); move([cur[0], cur[1], HOVER_Z] + list(cur[3:]), tag="호버 z478")
+    PC.speed(SPD_MOVE); move([cur[0], cur[1], SAFE_Z] + list(cur[3:]), tag="SAFE"); PC.speed(1)
+    set_stage("DONE", color=color)
+
+
+# ------------------------------------------------------------------ 사이클
+def run_cycle(color, teach_rack=False):
+    global _logf
+    _logf = open(os.path.join(STATE, "logs", f"cycle_{color}_{time.strftime('%m%d_%H%M%S')}.log"), "a")
+    with LOCK:
+        S.update(color=color, err=None, base=None, rack=None, grasp=None, target=None, align=None, seat=None)
+    B = stage_base()
+    slot_target(color, B)                                          # 기준 없으면 여기서 정지(픽 전에 안다)
+    G = stage_rack(color, teach_rack)
+    T = slot_target(color, B, G)
+    stage_carry_hover(color, T)
+    set_stage("WAIT DESCEND", wait="[⬇ 하강] 버튼 (x·y·yaw 확인 후)", color=color)
+
+
+# ------------------------------------------------------------------ 티칭 버튼
+_pending_seat = {}
+
+
+def teach_slot_tcp(color):
+    """1/2: 로봇이 손 안착 벽을 물고 있는 지금 TCP 저장."""
+    cur = PC.st()["tcp"]; _pending_seat[color] = list(cur)
+    log(f"  슬롯 기준 1/2 [{color}] 안착 TCP {[round(v, 2) for v in cur]} (다음: 놓고 관측자세 → 2/2)")
+
+
+def teach_slot_base(color):
+    """2/2: 관측자세에서 베이스 측정 → 1/2 의 TCP 와 페어링. ArUco 기준이 없으면 지금 마커로 생성."""
+    seat = _pending_seat.get(color)
+    if not seat:
+        raise Gate("먼저 [슬롯 기준 1/2] 로 안착 TCP 를 저장")
+    if not os.path.exists(F["aruco"]):
+        m, why = BT.markers()
+        if m and len(m) >= 3:
+            jsave(F["aruco"], {"markers": {str(k): v for k, v in m.items()}, "tcp": PC.st()["tcp"], "made": time.strftime("%Y-%m-%d %H:%M")})
+            log(f"  ArUco 기준 저장(마커 {sorted(m)})")
+        else:
+            log(f"  ⚠ ArUco 기준 미생성: {why or f'마커 {len(m)}개(<3)'} — 자 보정 없이 진행")
+    B = stage_base()
+    d = jload(F["slot"]) or {}
+    d[color] = {"seat_tcp": seat, "base": {"x": B["x"], "y": B["y"], "yaw": B["yaw"]}, "base_rms": B["rms"], "made": time.strftime("%Y-%m-%d %H:%M")}
+    jsave(F["slot"], d); _pending_seat.pop(color, None)
+    log(f"✅ 슬롯 기준 저장 [{color}] seat {[round(v, 1) for v in seat[:3]]} rz {seat[5]:+.1f} ↔ 베이스 ({B['x']:.1f},{B['y']:.1f},{B['yaw']:+.2f}°)")
+
+
+def teach_rack_offset(color):
+    """WAIT(랙 티칭) 중: 현재 TCP − 계산 TCP 를 벽 축(along/across) 으로 분해해 저장."""
+    with LOCK:
+        R = S.get("rack") or {}
+    if "calc_xy" not in R:
+        raise Gate("랙 티칭 대기 상태가 아님")
+    cur = PC.st()["tcp"]; d = np.array([cur[0] - R["calc_xy"][0], cur[1] - R["calc_xy"][1]])
+    ua, ux = np.array(R["axes"][0]), np.array(R["axes"][1])
+    prev = R.get("offset") or {"along": 0.0, "across": 0.0}
+    off = {"along": float(prev["along"] + d @ ua), "across": float(prev["across"] + d @ ux)}
+    rr = jload(F["rack"]); rr[color]["offset"] = off; rr[color]["offset_made"] = time.strftime("%Y-%m-%d %H:%M")
+    rr[color]["z_pick"] = cur[2]
+    jsave(F["rack"], rr)
+    log(f"✅ 랙 보정 저장 [{color}] along {off['along']:+.2f} across {off['across']:+.2f}mm (조그 {d[0]:+.2f},{d[1]:+.2f}) z_pick {cur[2]:.1f}")
+
+
+def teach_grasp_sig(color):
+    rr = (jload(F["rack"]) or {}).get(color) or {}
+    pts = PC.save_grasp_sig_now(color, rr.get("grip_close", 13), PC.grip_read())      # 부품(by_color 스키마 → F["sig"])
+    if not pts:
+        raise Gate("손목캠에 든 벽 점이 없음")
+
+
+def teach_hover(color, src="wrist"):
+    seeds = None
+    if src != "wrist":
+        w = HA.wall_dots(HA.grab(src), color, None, None, src)
+        if not w:
+            raise Gate(f"{src} 에 {color} 벽 점이 안 보임")
+        seeds = [(p[0], p[1]) for p in w[:2]]
+    HA.save_ref(color, src, seeds)                                  # 부품
+    log(f"✅ z440 기준 저장 [{color}/{src}]")
+
+
+def probe_cam(src, color):
+    w = HA.wall_dots(HA.grab(src), color, None, None, src)
+    if not w:
+        raise Gate(f"{src} 에 {color} 벽 점이 안 보임(벽 든 채 z440 이어야 함)")
+    seeds = [(p[0], p[1]) for p in w[:2]]
+    log(f"  {src} 매핑 시작: 벽 점 {[(round(x), round(y)) for x, y in seeds]} ±10mm 조그")
+    HA.probe_fixed(src, color, seeds)                               # 부품(J·rot_sign 실측 → cam2robot_<src>.json)
+
+
+# ------------------------------------------------------------------ 명령 처리(워커 1개: 로봇을 움직이는 명령은 순차)
+Q = queue.Queue()
+
+
+def worker():
+    while True:
+        op, arg = Q.get()
+        with LOCK:
+            S["busy"] = True; S["err"] = None
+        try:
+            ABORT.clear()
+            if op == "start": run_cycle(arg["color"], arg.get("teach_rack", False))
+            elif op == "descend": stage_descend(arg["color"])
+            elif op == "goto_obs": set_stage("GOTO OBS"); goto_obs(); set_stage("IDLE")
+            elif op == "slot2": set_stage("TEACH SLOT 2/2"); teach_slot_base(arg["color"]); set_stage("IDLE")
+            elif op == "probe": set_stage(f"PROBE {arg['src']}"); probe_cam(arg["src"], arg["color"]); set_stage("IDLE")
+        except Abort:
+            try: PC.post("stop", {"dry_run": False})
+            except Exception: pass
+            set_stage("STOPPED", err="사용자 중단"); log("⛔ 중단 — 로봇 정지. 벽은 사용자가 처리")
+        except Gate as g:
+            try: PC.post("stop", {"dry_run": False})
+            except Exception: pass
+            set_stage("STOPPED", err=str(g)); log(f"🛑 게이트 정지: {g}")
+        except Exception as ex:
+            try: PC.post("stop", {"dry_run": False})
+            except Exception: pass
+            set_stage("STOPPED", err=str(ex)); log("❌ 예외 정지: " + str(ex)); traceback.print_exc()
+        finally:
+            try: PC.speed(1)
+            except Exception: pass
+            with LOCK: S["busy"] = False
+
+
+def handle_cmd(q):
+    op = q.get("op", [""])[0]; color = q.get("color", [None])[0]; src = q.get("src", ["wrist"])[0]
+    if color is not None and color not in COLORS:
+        return {"ok": False, "err": f"색 {color}?"}
+    if op == "abort":
+        ABORT.set(); RESUME.set()
+        try: PC.post("stop", {"dry_run": False})
+        except Exception as e: return {"ok": False, "err": f"stop 실패 {e}"}
+        return {"ok": True}
+    if op == "resume":
+        RESUME.set(); return {"ok": True}
+    if op in ("start", "descend", "goto_obs", "slot2", "probe"):
+        if S["busy"]:
+            return {"ok": False, "err": "실행 중 — 먼저 중단"}
+        Q.put((op, {"color": color, "src": src, "teach_rack": q.get("teach", ["0"])[0] == "1"})); return {"ok": True}
+    try:                                                            # 로봇 이동 없는 즉시 명령
+        if op == "slot1": teach_slot_tcp(color)
+        elif op == "rack_offset": teach_rack_offset(color)
+        elif op == "sig": teach_grasp_sig(color)
+        elif op == "hover_ref": teach_hover(color, src)
+        else: return {"ok": False, "err": f"op {op}?"}
+        return {"ok": True}
+    except Exception as ex:
+        log(f"⚠ {op}: {ex}"); return {"ok": False, "err": str(ex)}
+
+
+def snapshot():
+    with LOCK:
+        d = dict(S)
+    try:
+        s = PC.st(); d["tcp"] = [round(v, 2) for v in s["tcp"]]; d["grip"] = s.get("gripper"); d["frozen"] = s.get("frozen")
+    except Exception as e:
+        d["tcp"] = None; d["bridge_err"] = str(e)
+    refs = {}
+    slot = jload(F["slot"]) or {}; rack = jload(F["rack"]) or {}; sig = (jload(F["sig"]) or {}).get("by_color", {}); hov = jload(F["hover"]) or {}
+    for c in COLORS:
+        refs[c] = {"slot": c in slot, "rack": c in rack, "rack_offset": bool(rack.get(c, {}).get("offset_made")), "sig": c in sig, "hover": sorted((hov.get(c) or {}).keys())}
+    d["refs"] = refs
+    d["maps"] = {"newcam": os.path.exists(HA.SRC["newcam"]["map"]), "side": os.path.exists(HA.SRC["side"]["map"]), "aruco_ref": os.path.exists(F["aruco"])}
+    d["gates"] = {"정렬 완료": bool((d.get("align") or {}).get("done")), "파지 게이트": bool((d.get("grasp") or {}).get("ok")),
+                  "베이스 이번 사이클": bool(d.get("base")), "동결 아님": not d.get("frozen"), "대기 없음": d.get("wait") is None}
+    return d
+
+
+PAGE = r"""<!doctype html><meta charset=utf-8><title>HOUSE CYCLE</title>
+<style>body{font:14px system-ui;margin:12px;background:#111;color:#eee}button{margin:2px;padding:6px 10px;font-size:14px}
+.big{font-size:18px;padding:10px 16px}.st{font-size:22px;margin:6px 0}.ok{color:#5f5}.no{color:#f66}.wait{color:#fc3}
+pre{background:#000;padding:8px;height:260px;overflow:auto;font-size:12px}table{border-collapse:collapse}td,th{border:1px solid #444;padding:2px 8px}
+.card{display:inline-block;vertical-align:top;background:#1c1c1c;padding:8px;margin:4px;border-radius:6px;min-width:260px}</style>
+<h2>HOUSE CYCLE <small id=tcp></small></h2>
+<div class=st>단계: <b id=stage>-</b> <span id=wait class=wait></span></div>
+<div>색: <select id=color><option>blue<option>yellow<option>red<option>red_s</select>
+ <button class=big onclick="cmd('start')">▶ 사이클(1→2→2')</button>
+ <button onclick="cmd('start',{teach:1})">▶ 사이클 + 랙 파지 티칭</button>
+ <button class=big id=desc onclick="if(confirm('수직 하강? x·y·yaw 확인했나'))cmd('descend')">⬇ 하강(3)</button>
+ <button class=big style="background:#a00;color:#fff" onclick="cmd('abort')">⛔ 중단</button>
+ <button onclick="cmd('resume')">▶ 계속</button>
+ <button onclick="cmd('goto_obs')">관측자세로</button></div>
+<div class=card><b>티칭(선택한 색)</b><br>
+ <button onclick="cmd('slot1')">슬롯 기준 1/2 (안착 TCP)</button> <button onclick="cmd('slot2')">슬롯 기준 2/2 (관측 페어링)</button><br>
+ <button onclick="cmd('rack_offset')">랙 보정 저장</button> <button onclick="cmd('sig')">좋은 파지 서명 저장</button><br>
+ <button onclick="cmd('hover_ref',{src:'wrist'})">z440 기준 저장(손목)</button>
+ <button onclick="cmd('hover_ref',{src:'newcam'})">(새카메라)</button> <button onclick="cmd('hover_ref',{src:'side'})">(측면)</button><br>
+ <button onclick="cmd('probe',{src:'newcam'})">고정캠 매핑: 새카메라</button> <button onclick="cmd('probe',{src:'side'})">측면캠</button></div>
+<div class=card><b>게이트</b><div id=gates></div></div>
+<div class=card><b>기준 보유</b><div id=refs></div></div>
+<div class=card><b>수치</b><div id=nums></div></div>
+<pre id=log></pre>
+<script>
+const $=id=>document.getElementById(id);
+async function cmd(op,extra={}){const p=new URLSearchParams({op,color:$('color').value,...extra});const r=await fetch('/cmd?'+p).then(r=>r.json());if(!r.ok)alert(r.err);}
+function f(o){return o?JSON.stringify(o,(k,v)=>typeof v==='number'?+v.toFixed(2):v).replace(/[{}"]/g,'').replace(/,/g,'  '):'-'}
+async function poll(){try{const s=await fetch('/state').then(r=>r.json());
+ $('stage').textContent=s.stage+(s.err?'  ✖ '+s.err:'');$('wait').textContent=s.wait?'⏸ '+s.wait:'';
+ $('tcp').textContent=s.tcp?`tcp ${s.tcp.slice(0,3).join(',')} rz${s.tcp[5]} grip ${s.grip}${s.frozen?' ❄FROZEN':''}`:'브리지 없음';
+ $('gates').innerHTML=Object.entries(s.gates).map(([k,v])=>`<div class=${v?'ok':'no'}>${v?'✔':'✘'} ${k}</div>`).join('');
+ const allok=Object.values(s.gates).every(Boolean)&&s.stage==='WAIT DESCEND';$('desc').disabled=!allok;$('desc').style.opacity=allok?1:.4;
+ $('refs').innerHTML='<table><tr><th>색<th>슬롯<th>랙보정<th>서명<th>z440</tr>'+Object.entries(s.refs).map(([c,r])=>`<tr><td>${c}<td>${r.slot?'✔':'✘'}<td>${r.rack_offset?'✔':(r.rack?'seed':'✘')}<td>${r.sig?'✔':'✘'}<td>${r.hover.join('/')||'✘'}`).join('')+'</table>'
+  +`<div>매핑 newcam ${s.maps.newcam?'✔':'✘'} · side ${s.maps.side?'✔':'✘'} · ArUco기준 ${s.maps.aruco_ref?'✔':'✘'}</div>`;
+ $('nums').innerHTML=`<div>베이스: ${f(s.base&&{x:s.base.x,y:s.base.y,yaw:s.base.yaw,rms:s.base.rms})}</div><div>랙: ${f(s.rack&&{len_px:s.rack.len_px,dang:s.rack.dang,xy:s.rack.grip_xy})}</div>
+  <div>파지: ${f(s.grasp)}</div><div>목표: ${f(s.target&&{x:s.target.x,y:s.target.y,rz:s.target.rz,dyaw:s.target.dyaw})}</div><div>정렬: ${f(s.align)}</div><div>안착: ${f(s.seat)}</div>`;
+ $('log').textContent=s.log.slice(-60).join('\n');$('log').scrollTop=1e9;}catch(e){}}
+setInterval(poll,1000);poll();
+</script>"""
+
+
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def _send(self, code, body, ctype="application/json"):
+        b = body.encode() if isinstance(body, str) else body
+        self.send_response(code); self.send_header("Content-Type", ctype + "; charset=utf-8")
+        self.send_header("Access-Control-Allow-Origin", "*"); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+    def do_GET(self):
+        u = urlparse(self.path); q = parse_qs(u.query)
+        if u.path == "/": return self._send(200, PAGE, "text/html")
+        if u.path == "/state": return self._send(200, json.dumps(snapshot(), ensure_ascii=False))
+        if u.path == "/cmd": return self._send(200, json.dumps(handle_cmd(q), ensure_ascii=False))
+        if u.path == "/health": return self._send(200, json.dumps({"ok": True, "stage": S["stage"]}))
+        self._send(404, "{}")
+
+
+if __name__ == "__main__":
+    seed_state()
+    threading.Thread(target=worker, daemon=True).start()
+    log(f"house_cycle :{PORT}  state={STATE}")
+    ThreadingHTTPServer(("0.0.0.0", PORT), H).serve_forever()
