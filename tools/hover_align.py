@@ -51,7 +51,7 @@ DET = {"wrist":  {"amin_wall": 150, "feat_area": (60, 1400), "near": 80.0, "sear
        "newcam": {"amin_wall": 40,  "feat_area": (20, 1400), "near": 60.0, "search": 120.0,
                   "ranges": {"blue": ((95, 150, 70), (118, 255, 255)), "yellow": ((15, 80, 110), (40, 255, 255)),
                              "red": [((0, 100, 80), (10, 255, 255)), ((160, 100, 80), (180, 255, 255))]},
-                  "exclude": [(250, 400, 350, 480)]},          # 왼쪽 빨간 케이블(고정) 오검출 제외
+                  "exclude": [(300, 380, 420, 460), (440, 670, 540, 720)]},   # 카메라에 붙어 같이 움직이는 고정물: 왼쪽 빨간 케이블(13:12 프로브에서 8px), 아래 파란 점(4px)
        "side":   {"amin_wall": 12,  "feat_area": (10, 400), "near": 30.0, "search": 60.0,
                   # 측면 빨간 기둥점 H 0~5(라이브 실측, 랩어라운드) → 두 구간 합집합
                   "ranges": {"blue": ((95, 120, 80), (125, 255, 255)), "yellow": ((15, 60, 100), (40, 255, 255)),
@@ -434,12 +434,12 @@ def fmt(D):
             f"(특징 {len(D['matched'])} s={D['sim']['s']:.3f} θ={D['sim']['theta']:+.2f}° rms {D['sim']['rms']:.1f}px {D['scale_mm_px']:.3f}mm/px)")
 
 
-def align(color, dry=False, tol_mm=TOL_MM, tol_deg=TOL_DEG):
-    """보정 루프. 수렴 True / dry False / 실패 예외(호출자가 정지·보고)."""
+def align(color, dry=False, tol_mm=TOL_MM, tol_deg=TOL_DEG, srcs=None):
+    """보정 루프. 수렴 True / dry False / 실패 예외(호출자가 정지·보고). srcs 로 카메라 지정(예: ("newcam",))."""
     prev = None
     check.expo_done = False
     for it in range(MAX_ITER):
-        C, per, why = check(color)
+        C, per, why = check(color, srcs)
         for D in per.values():
             print(f"  호버정렬 {it}: {fmt(D)}", flush=True)
         if C is None:

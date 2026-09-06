@@ -11,6 +11,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, "/home/ar/bf2_console/tools")
 import hover_align as HA
+import os
+HA.REF = os.environ.get("HOUSE_HOVER_REF", "/home/ar/bf2_console/state/house/hover_ref.json")   # 9/6 13:1x: house_cycle 과 같은 기준 파일(옛 hover_ref_0905 를 읽어 dXY 5mm 유령 표시)
 
 PORT = 8775
 state = {"color": "blue", "jpg": {}, "txt": {}}
