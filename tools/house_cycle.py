@@ -80,7 +80,7 @@ ALIGN_SRCS = {"blue": ("newcam",)}                # 색별 정렬 카메라(없�
 #   손목캠 기준(13:47)이 삽입 후 밀린 벽 각으로 찍혀 rz +0.5° 편향 → 우선 "measure"(측정·성공 시 승격만) 로 한 사이클 재기준 후 "rz" 로 승격.
 RZ_MEASURE_WARN = 0.6                            # 정렬 중 손목캠이 재는 벽 회전이 이만큼 넘으면 경고(죠 안에서 벽이 돌아감 = 재파지 신호. rz 를 억지로 돌려 맞추지 않는다)
 ALIGN_ROLES = {"blue":   {"newcam": "xy", "wrist": "measure"},   # ★rz 고정 모드: rz 담당 없음 → 정렬은 XY 만, rz 는 운반의 절대 명령값 그대로
-               "yellow": {"newcam": "xy", "wrist": "measure"},   # 노랑도 rz 고정(슬롯 rz 90, 벽 점 1개라 회전 측정 불가 — 절대 rz 가 정답)
+               "yellow": {"wrist": "xy"},                        # 9/6 19:28 실측: 노랑 자리(rz90)에선 새카메라가 든 벽을 전혀 못 봄 → 손목캠 단독 XY. rz 담당 없음 = rz 고정
                "red":    {"newcam": "xy", "wrist": "measure"},
                "red_s":  {"newcam": "xy", "wrist": "measure"}}
 # 정렬 수렴 후 사용자 조그 4회(14:33·14:51·15:31·15:57): dx −0.89/−0.04/−1.00/−0.99, dy −2.18/−1.02/−2.03/−2.50, drz +0.32/+0.88/+0.93/+0.65
@@ -661,6 +661,9 @@ def stage_descend_reteach(color):
             "[⛔중단]=정지 / [▶계속]=사용자 육안 확인 → 슬롯 기준만 갱신하고 놓기(15:35 사고: 판정 unknown 인 벽을 들어올려 재촬영하다 베이스 딸려가 재하강 끼임 → 재촬영 생략)")
         wait_user("SEAT FAIL — 그리퍼 유지: [⛔중단] 또는 [▶계속](안착 육안 확인 시 → 재촬영 없이 놓기)")
         log("  사용자 [▶계속]: 안착 육안 확인 → 재촬영 생략, 슬롯 기준 갱신 후 놓기")
+        if not (((jload(os.path.join(STATE, "pose_refs", f"{color}.json")) or {}).get("seat") or {}).get("cams")):
+            log("  (안착 기준이 아직 없는 색 → 지금 앉은 자리로 최초 촬영: 로봇은 움직이지 않음)")
+            promote_seat_ref(color)          # 부트스트랩 1회만. 이후 사이클은 seated 성공 시에만 갱신
         with LOCK: S["seat"] = dict(seat, user_override=True); B = S.get("base")
         at = PC.st()["tcp"]
         promote_slot_ref(color, [at[0], at[1], T["z_seat"], at[3], at[4], at[5]], B or jload(F["base_last"]), note="사용자 육안 안착(판정 unknown) → 슬롯 기준 갱신, 카메라 기준 재촬영 생략")
@@ -1044,7 +1047,7 @@ async function poll(){try{const s=await fetch('/state').then(r=>r.json());
  $('stage').style.color=s.stage.startsWith('SEAT FAIL')?'#f66':'';$('wait').textContent=s.wait?'⏸ '+s.wait:'';
  $('tcp').textContent=s.tcp?`tcp ${s.tcp.slice(0,3).join(',')} rz${s.tcp[5]} grip ${s.grip}${s.frozen?' ❄FROZEN':''}`:'브리지 없음';
  $('gates').innerHTML=Object.entries(s.gates).map(([k,v])=>`<div class=${v?'ok':'no'}>${v?'✔':'✘'} ${k}</div>`).join('');
- const allok=(Object.values(s.gates).every(Boolean)&&s.stage==='WAIT DESCEND')||((s.stage==='IDLE'||s.stage==='STOPPED')&&!s.busy&&s.tcp&&s.tcp[2]>=354&&s.tcp[2]<=443);$('desc').disabled=!allok;$('desc').style.opacity=allok?1:.4;  // 13:38: 사용자 수동 정렬(z440±3, IDLE/STOPPED)도 하강 허용 — 서버 게이트가 최종
+ const allok=((s.gates['정렬 완료']!==false)&&(s.gates['동결 아님']!==false)&&s.stage==='WAIT DESCEND')   // 19:33: 서버 재시작으로 파지·베이스 기록이 비면 버튼이 안 열림 — 서버측 descend_gate 가 최종 판정이므로 UI 는 정렬·동결만 본다||((s.stage==='IDLE'||s.stage==='STOPPED')&&!s.busy&&s.tcp&&s.tcp[2]>=354&&s.tcp[2]<=443);$('desc').disabled=!allok;$('desc').style.opacity=allok?1:.4;  // 13:38: 사용자 수동 정렬(z440±3, IDLE/STOPPED)도 하강 허용 — 서버 게이트가 최종
  $('refs').innerHTML='<table><tr><th>색<th>슬롯<th>랙보정<th>서명<th>z440</tr>'+Object.entries(s.refs).map(([c,r])=>`<tr><td>${c}<td>${r.slot?'✔':'✘'}<td>${r.rack_offset?'✔':(r.rack?'seed':'✘')}<td>${r.sig?'✔':'✘'}<td>${r.hover.join('/')||'✘'}`).join('')+'</table>'
   +`<div>매핑 newcam ${s.maps.newcam?'✔':'✘'} · side ${s.maps.side?'✔':'✘'} · ArUco기준 ${s.maps.aruco_ref?'✔':'✘'}</div>`;
  $('nums').innerHTML=`<div>베이스: ${f(s.base&&{x:s.base.x,y:s.base.y,yaw:s.base.yaw,rms:s.base.rms})}</div><div>랙: ${f(s.rack&&{len_px:s.rack.len_px,dang:s.rack.dang,xy:s.rack.grip_xy})}</div>
