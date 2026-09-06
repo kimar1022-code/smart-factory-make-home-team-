@@ -476,6 +476,25 @@ def seat_check(color=None):
         return seat
 
 
+def promote_seat_ref(color):
+    """안착 성공 시 새카메라 안착 기준(pose_refs/<색>.json seat.cams.newcam.dots)도 지금 프레임으로 승격.
+    14:28 실기: 12:35 손 안착 사진 기준이 슬롯 승격마다 멀어져 11.2px(허용 12) 까지 감 → 성공 자리를 따라가게."""
+    try:
+        f = os.path.join(STATE, "pose_refs", f"{color}.json")
+        pr = jload(f) or {}
+        img = HA.grab("newcam")
+        dots = {c: [[float(q[0]), float(q[1]), float(q[2])] for q in HA._blobs(img, c, 20, "newcam")] for c in ("blue", "yellow", "red")}
+        seat = pr.setdefault("seat", {}); cams = seat.setdefault("cams", {})
+        prev = cams.get("newcam")
+        hist = ([{k: v for k, v in prev.items() if k != "history"}] + list((prev or {}).get("history") or []))[:3] if prev else []
+        cams["newcam"] = {"dots": dots, "made": time.strftime("%Y-%m-%d %H:%M"), "note": "안착 성공 사이클에서 자동 승격", "history": hist}
+        seat["tcp"] = PC.st()["tcp"]
+        jsave(f, pr)
+        log(f"  ✅ 안착 기준 승격(newcam): " + " ".join(f"{c}{[(round(x), round(y)) for x, y, a in lst]}" for c, lst in dots.items() if lst))
+    except Exception as ex:
+        log(f"  ⚠ 안착 기준 승격 실패: {ex}")
+
+
 def promote_slot_ref(color, seat_tcp, B, note="자동 승격: 안착 성공 TCP + 이번 사이클 베이스"):
     """③안착 성공한 TCP + 이번 사이클 베이스 측정을 slot_ref 로 승격. 이전 값은 history(최대 SLOT_HISTORY_MAX) 로 보존."""
     if not B:
@@ -524,6 +543,7 @@ def stage_descend(color):
         at = PC.st()["tcp"]
         if not HA.promote_ref(color):                               # 성공 사이클 정렬 상태 → 다음 z440 기준
             log("  (z440 기준 승격 없음: 이번 정렬의 마지막 측정이 없음)")
+        promote_seat_ref(color)                                     # 새카메라 안착 기준도 성공 자리로
         with LOCK: B = S.get("base")
         promote_slot_ref(color, [at[0], at[1], T["z_seat"], at[3], at[4], at[5]], B)   # z 는 티칭값 유지(접촉 조기정지 z 승격 시 위로 표류 방지)
     release_and_rise(color, rr)
@@ -559,6 +579,7 @@ def stage_descend_reteach(color):
         B = jload(F["base_last"]); log(f"  베이스: base_last({(B or {}).get('made')}) 사용")
     seat_tcp = [at[0], at[1], T["z_seat"], at[3], at[4], at[5]]
     promote_slot_ref(color, seat_tcp, B, note="사용자 육안 정렬 자리에서 안착 성공 → 슬롯 기준 갱신")
+    promote_seat_ref(color)
     _pending_seat[color] = list(seat_tcp); jsave(_PENDING_F, _pending_seat)
     set_stage("3' RETEACH z440", color=color)
     zh = T["z_seat"] + 85.0
