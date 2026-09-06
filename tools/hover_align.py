@@ -258,7 +258,13 @@ def jinv_for(src, z_tcp, rz_tcp):
     m = json.load(open(f))
     if abs(z_tcp - m["z"]) > 5:
         raise RuntimeError(f"{src} 매핑은 z{m['z']:.0f} 용, 지금 z{z_tcp:.0f}")
-    return np.array(m["Jinv_mm_per_px"], float), m.get("rot_sign", -1.0)
+    J = np.array(m["Jinv_mm_per_px"], float)
+    if SRC[src]["moving"] == "base":
+        # ★손목에 붙은 카메라(새카메라): rz 가 돌면 화면도 같이 돈다 → 매핑 촬영 시 rz 대비 차이만큼 회전.
+        #   9/6 19:0x: 매핑은 rz −180 에서 측정. 노랑 슬롯은 rz 90 → 이 보정 없으면 90° 틀린 방향으로 감(9/2 '축매핑 발산 3회' 와 같은 함정).
+        rz_map = float((m.get("tcp") or [0, 0, 0, 0, 0, RZ_MAP])[5])
+        J = _rot(HG.wrap_deg(rz_tcp - rz_map)) @ J
+    return J, m.get("rot_sign", -1.0)
 
 
 def delta(ref, meas, z_tcp, rz_tcp, src="wrist"):
