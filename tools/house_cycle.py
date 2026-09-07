@@ -1089,7 +1089,8 @@ async function poll(){try{const s=await fetch('/state').then(r=>r.json());
  $('stage').style.color=s.stage.startsWith('SEAT FAIL')?'#f66':'';$('wait').textContent=s.wait?'⏸ '+s.wait:'';
  $('tcp').textContent=s.tcp?`tcp ${s.tcp.slice(0,3).join(',')} rz${s.tcp[5]} grip ${s.grip}${s.frozen?' ❄FROZEN':''}`:'브리지 없음';
  $('gates').innerHTML=Object.entries(s.gates).map(([k,v])=>`<div class=${v?'ok':'no'}>${v?'✔':'✘'} ${k}</div>`).join('');
- const allok=((s.gates['정렬 완료']!==false)&&(s.gates['동결 아님']!==false)&&s.stage==='WAIT DESCEND')   // 19:33: 서버 재시작으로 파지·베이스 기록이 비면 버튼이 안 열림 — 서버측 descend_gate 가 최종 판정이므로 UI 는 정렬·동결만 본다||((s.stage==='IDLE'||s.stage==='STOPPED')&&!s.busy&&s.tcp&&s.tcp[2]>=354&&s.tcp[2]<=443);$('desc').disabled=!allok;$('desc').style.opacity=allok?1:.4;  // 13:38: 사용자 수동 정렬(z440±3, IDLE/STOPPED)도 하강 허용 — 서버 게이트가 최종
+ /* UI 는 정렬·동결만 본다(서버 descend_gate 가 최종). 재시작으로 파지·베이스 기록이 비어도 열리게. */
+ const allok=((s.gates['정렬 완료']!==false)&&(s.gates['동결 아님']!==false)&&s.stage==='WAIT DESCEND')||((s.stage==='IDLE'||s.stage==='STOPPED')&&!s.busy&&s.tcp&&s.tcp[2]>=354&&s.tcp[2]<=443);$('desc').disabled=!allok;$('desc').style.opacity=allok?1:.4;  // 13:38: 사용자 수동 정렬(z440±3, IDLE/STOPPED)도 하강 허용 — 서버 게이트가 최종
  $('refs').innerHTML='<table><tr><th>색<th>슬롯<th>랙보정<th>서명<th>z440</tr>'+Object.entries(s.refs).map(([c,r])=>`<tr><td>${c}<td>${r.slot?'✔':'✘'}<td>${r.rack_offset?'✔':(r.rack?'seed':'✘')}<td>${r.sig?'✔':'✘'}<td>${r.hover.join('/')||'✘'}`).join('')+'</table>'
   +`<div>매핑 newcam ${s.maps.newcam?'✔':'✘'} · side ${s.maps.side?'✔':'✘'} · ArUco기준 ${s.maps.aruco_ref?'✔':'✘'}</div>`;
  $('nums').innerHTML=`<div>베이스: ${f(s.base&&{x:s.base.x,y:s.base.y,yaw:s.base.yaw,rms:s.base.rms})}</div><div>랙: ${f(s.rack&&{len_px:s.rack.len_px,dang:s.rack.dang,xy:s.rack.grip_xy})}</div>
