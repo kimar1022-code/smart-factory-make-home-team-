@@ -25,7 +25,7 @@ BR = "http://127.0.0.1:8765"
 CAL = "/home/ar/bf2_console/dot_calib.json"
 OBS = [200.0, -330.0, 650.0, 180.0, 0.0, 180.0]      # 관측자세(매핑 기준)
 SAFE_Z, HOVER_Z = 650.0, 478.0
-SEAT_Z = {"blue": 355.0, "yellow": 354.0, "red": 353.0, "red_s": 351.0, "red_in": 353.0}   # 9/2~3 골든 안착 z
+SEAT_Z = {"blue": 355.0, "yellow": 354.0, "red": 353.0, "red_s": 351.0, "red_in": 338.0}   # 9/2~3 골든 안착 z
 SPD_MOVE, SPD_DESC, SPD_SEAT = 30, 10, 3
 
 
@@ -715,9 +715,10 @@ def run(color, seat=False, do_pick=True, target=None, align=True, len_gate=False
 #   파랑 200 — 랙 위 z465 에서 위쪽 점은 expo167 에 면적 273 이라 하한 500 에 걸려 버려졌고,
 #   그 탓에 늘 '화면 바닥에 잘린 아래쪽 점'만 남아 중심이 흔들렸다.
 HELD_AREA_MIN = {"blue": 200, "yellow": 500, "red": 400, "red_s": 250, "red_in": 250}
-# ★9/7 20:0x: 내벽(red_in)은 다른 벽보다 짧아 물렸을 때 점이 x≈785 에 맺힌다 —
-#   든 벽 영역 x≥820 에 걸려 "벽 점 0개"가 됐다. 색별로 좌측 한계를 둔다(랙 쪽 점과는 여전히 멀다).
-HELD_X_MIN = {"red_in": 740}
+# ★9/7 20:1x 오진 기록: red_in 이 "벽 점 0개"라 x_min 을 740 으로 내렸더니 잡히긴 했는데,
+#   그건 든 벽이 아니라 **베이스 기둥의 빨간 점**(785,522)이었다 — 벽은 이미 떨어져 있었다.
+#   x≥820 은 바로 그 베이스를 배제하려고 있는 값이다. 완화 철회. 색별 예외가 필요하면 여기에만 둔다.
+HELD_X_MIN = {}
 HELD_NEAR_PX = 90.0
 
 
@@ -752,9 +753,14 @@ def held_wall_dots(color):
     # ★9/7 17:12: 이 함수만 y 상한 700 을 쓰고 서명 쪽(_held_blobs)은 715 라, 새 파랑 서명 점(y 701.3)이
     #   1.3px 차이로 여기서만 배제돼 "막힘 감시용 벽 점 없음 — 하강 금지" 가 났다. 검출 경로를 하나로 합친다.
     amin = HELD_AREA_MIN.get(color, 400)
-    pts = _held_blobs(img, WALL_DOT_HSV[color], [amin, 6000], min(600, HELD_X_MIN.get(color, 820)))
     ref = load_grasp_ref(color)
     anchors = [(q[0], q[1]) for q in (ref or {}).get("cam1_wall_pd") or []]
+    # ★9/7 20:36 헛정지: 서명이 없으면 면적순 폴백으로 떨어지는데 그 창이 x≥600 이라, 랙 위에서
+    #   **랙에 꽂힌 벽**의 점(x≈725~732)을 "그리퍼에 벽이 있다"로 세어 그리퍼 열기 게이트가 헛섰다.
+    #   서명이 있으면 그 점 근처만 고르므로 창은 넓어도 되지만, 서명이 없을 때는 든 벽 영역(x≥820)만 본다
+    #   — 저장된 네 색 서명의 든 벽 점이 전부 x 983~1029 이라 이게 실측에 맞는 창이다.
+    x_min = min(600, HELD_X_MIN.get(color, 820)) if anchors else HELD_X_MIN.get(color, 820)
+    pts = _held_blobs(img, WALL_DOT_HSV[color], [amin, 6000], x_min)
     if anchors:
         out = []
         for ax, ay in anchors:

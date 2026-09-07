@@ -7,6 +7,10 @@ from edge_anchor import _subpix_line
 
 RAISE_MM = 15.0      # 바닥보다 이만큼 가까우면 밑판(돌출)
 PLATE_BAND = 12.0    # 밑판 윗면 뎁스 ± 이 대역만 밑판으로(기둥 제외)
+# ★9/7 21:1x 사용자 지시("내벽하고 외벽 조건 따로 써 이러다 외벽 망가지면 힘들어"):
+#   내벽 대응(밑판 윗면이 내벽에 끊겨 두 칸이 되는 경우)은 기본 OFF. 외벽만 있을 때는 아래 두 곳이
+#   전혀 실행되지 않아 코드 경로가 예전과 완전히 같다. 기둥 검출이 실패했을 때만 켜서 한 번 더 본다.
+INNER_WALL_MODE = False
 NX, NY = 128, 72
 
 
@@ -59,6 +63,31 @@ def depth_mask(grid, shape):
         return None, float(np.nanmedian(plane))
     i = 1 + int(np.argmax(st[1:, cv2.CC_STAT_AREA]))
     small = (lab == i).astype(np.uint8) * 255
+    # ★9/7 21:0x 내벽 추가로 처음 나온 문제: 내벽(4mm)이 밑판 윗면 대역을 위/아래 두 조각으로 끊는다.
+    #   여기서 '가장 큰 조각 하나'만 남기던 탓에 아래 칸만 밑판이 되어 사각형이 반쪽(y290~599)이 되고,
+    #   위쪽 두 꼭짓점에 기둥 점이 없어 색 배치 검증이 무너져 기둥 0/4 가 났다.
+    #   → 큰 조각의 테두리를 3칸 넓힌 범위 안에 있고 면적이 25% 이상인 조각만 함께 밑판으로 본다.
+    #   온전한 밑판(외벽만 꽂힌 경우)은 조각이 하나라 이 루프가 아무것도 더하지 않는다 = 기존 경로 그대로.
+    def _box(k):
+        return (st[k, cv2.CC_STAT_LEFT], st[k, cv2.CC_STAT_TOP],
+                st[k, cv2.CC_STAT_LEFT] + st[k, cv2.CC_STAT_WIDTH],
+                st[k, cv2.CC_STAT_TOP] + st[k, cv2.CC_STAT_HEIGHT])
+
+    def _adjacent(a, b, gap=4):
+        """벽 하나(≤ 몇 칸)를 사이에 두고 한 축으로 이어지는가 — 한 축은 절반 넘게 겹치고 다른 축의 틈이 gap 이하."""
+        ax0, ay0, ax1, ay1 = a; bx0, by0, bx1, by1 = b
+        ox = min(ax1, bx1) - max(ax0, bx0); oy = min(ay1, by1) - max(ay0, by0)
+        gx = max(0, max(ax0, bx0) - min(ax1, bx1)); gy = max(0, max(ay0, by0) - min(ay1, by1))
+        if ox > 0.5 * min(ax1 - ax0, bx1 - bx0) and gy <= gap:
+            return True
+        return oy > 0.5 * min(ay1 - ay0, by1 - by0) and gx <= gap
+
+    _a0 = st[i, cv2.CC_STAT_AREA]; _b0 = _box(i)
+    for _k in range(1, n) if INNER_WALL_MODE else ():
+        if _k == i or st[_k, cv2.CC_STAT_AREA] < 0.25 * _a0:
+            continue
+        if _adjacent(_b0, _box(_k)):
+            small[lab == _k] = 255
     full = cv2.resize(small, (shape[1], shape[0]), interpolation=cv2.INTER_NEAREST)
     depth_mask.last = {"plate_h": float(top), "plane_med": float(np.nanmedian(plane))}
     return full, float(np.nanmedian(plane))
@@ -130,9 +159,19 @@ def detect_rect(img, grid):
     mask, floor = depth_mask(grid, gray.shape)
     if mask is None:
         return None, "뎁스 돌출 영역 없음"
+    # ★9/7 21:0x: 내벽이 밑판 윗면을 가로지르며 남긴 좁은 이음매(≈10px)를 OPEN(61) 이 끊어 버려
+    #   아래 칸만 밑판이 됐다. 먼저 그 폭만 메우고(21px) 그다음에 가는 돌출부를 제거한다.
+    #   온전한 밑판 마스크는 메울 틈이 없어 CLOSE 가 아무것도 바꾸지 않는다 = 외벽만 있을 때 경로 그대로.
+    if INNER_WALL_MODE:
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((21, 21), np.uint8))
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((61, 61), np.uint8))   # ★꽂힌 벽 등 가는 돌출부 제거(밑판 본체만)
     cs, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     c = max(cs, key=cv2.contourArea)
+    # ★9/7 20:5x 내벽 추가로 처음 나온 문제: 내벽(4mm)이 밑판 테두리를 가로질러 마스크를 위/아래 두 조각으로
+    #   끊는다 → 가장 큰 조각(아래 칸)만 밑판으로 잡혀 사각형이 (510,300)~(779,599) 로 반쪽이 되고,
+    #   위쪽 두 꼭짓점에 기둥 점이 없어 색 배치 검증이 무너져 기둥 0/4 가 된다.
+    #   조각났을 때만(가장 큰 조각 < 전체의 70%) 그 틈을 메워 다시 잡는다 — 온전한 밑판은 조각이 하나라
+    #   비율 1.0 이므로 외벽만 있을 때의 경로는 그대로다.
     box = cv2.boxPoints(cv2.minAreaRect(c))                 # 4점(대략, 격자 해상도 ±10px)
     # ★순서 고정 [TL, TR, BR, BL] — measure() 가 corners[2]=BL, corners[3]=TL, lines[2]=아래변, lines[3]=왼쪽변 으로 가정
     bx = box[np.argsort(box[:, 0])]; left = bx[:2][np.argsort(bx[:2][:, 1])]; right = bx[2:][np.argsort(bx[2:][:, 1])]

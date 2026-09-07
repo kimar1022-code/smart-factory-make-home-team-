@@ -88,6 +88,8 @@ WALL_DOT_HSV = {
 }
 
 
+_FIXED_CAM_COLOR = {"red_s": "red", "red_in": "red"}   # 고정캠(newcam/side) 색 범위 대체
+
 # ------------------------------------------------------------------ 검출
 def grab(src="wrist"):
     b = UR.urlopen(SRC[src]["url"], timeout=5).read()
@@ -96,7 +98,8 @@ def grab(src="wrist"):
 
 def _blobs(img, color, amin, src="wrist"):
     rng = DET[src]["ranges"]
-    r = (rng[color if color != "red_s" else "red"] if rng else WALL_DOT_HSV[color])
+    # 고정캠 테이블은 기본 3색만 둔다. 짧은 빨강(red_s)·내벽(red_in)은 같은 빨간 점이라 red 범위를 쓴다.
+    r = (rng[_FIXED_CAM_COLOR.get(color, color)] if rng else WALL_DOT_HSV[color])
     ranges = r if isinstance(r, list) else [r]
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     m = None
