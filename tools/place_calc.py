@@ -666,6 +666,18 @@ def descend_monitored(color, x, y, rot, zs, g_close):
     하나라도 걸리면 즉시 정지 → 25mm 상승 → 예외. 절대 계속 밀지 않는다."""
     ref = held_wall_dots(color)
     if not ref:
+        # 9/7: 베이스 기둥은 저노출(42), 든 벽 점은 고노출(83~167)이 필요 — 정렬 단계 노출이 낮게 남으면 여기서 0개가 된다.
+        #   하강 직전에 벽 점이 보이는 노출로 올린다(감시는 벽 점만 쓰므로 기둥은 안 봐도 된다).
+        import color_lock as CL
+        for ex in (83, 167, 250, 333):
+            try:
+                CL.expo(set=ex); time.sleep(0.9)
+            except Exception:
+                break
+            ref = held_wall_dots(color)
+            if ref:
+                print(f"  (막힘 감시: 벽 점이 안 보여 노출 {ex} 로 올림 → {len(ref)}개)", flush=True); break
+    if not ref:
         raise RuntimeError("막힘 감시용 벽 점이 손목캠에 없음 — 하강 금지")
     ref_c = (sum(p[0] for p in ref) / len(ref), sum(p[1] for p in ref) / len(ref))
     print(f"  감시 기준 벽 점 {[(round(p[0]),round(p[1])) for p in ref]}")
