@@ -58,7 +58,7 @@ PORT = 8776
 OBS = PC.OBS                                    # [200,-330,650,180,0,180]
 SAFE_Z = PC.SAFE_Z                              # 650
 HOVER_Z = PC.HOVER_Z                            # 478
-COLORS = ("blue", "yellow", "red", "red_s")
+COLORS = ("blue", "yellow", "red", "red_s", "red_in")   # ★9/7 red_in = 내벽(흰 바탕 빨간 점 3개, 새 랙)
 GRIP_OPEN = 30                                  # 사용자 설계: 벌림 30 으로 내려온다
 RACK_RZ_FOLLOW = False                          # 랙 위 벽 각을 rz 로 따라갈지(부호 미검증 → 기본 끔, 각은 보고만)
 RACK_ANG_MAX = 3.0                              # 랙 위 벽 각 변화 상한(넘으면 벽이 삐뚤게 놓인 것 → 정지)
@@ -83,10 +83,13 @@ ALIGN_MAX_MOVE_MM = 4.0    # ★9/7: 정렬이 슬롯 기준에서 이만큼 넘
 ALIGN_ROLES = {"blue":   {"newcam": "xy", "wrist": "measure"},   # ★rz 고정 모드: rz 담당 없음 → 정렬은 XY 만, rz 는 운반의 절대 명령값 그대로
                "yellow": {"wrist": "xy"},                        # 9/6 19:28 실측: 노랑 자리(rz90)에선 새카메라가 든 벽을 전혀 못 봄 → 손목캠 단독 XY. rz 담당 없음 = rz 고정
                "red":    {"newcam": "xy"},                       # 9/6 20:37 실측: 빨강 자리에선 손목캠이 기둥 1개만 봄(기준 생성 불가), 새카메라는 벽점1+기둥4 → 새카메라 단독 XY(rz 고정)
-               "red_s":  {"wrist": "xy"}}                        # 9/7 11:00 실측: red_s 자리에서 손목캠이 기둥 4개(파랑3·노랑1)+든 벽 점을 안정적으로 봄. 새카메라는 벽이 화면 위끝, 측면캠 0개. (9/6 설계 메모의 "손목캠 못 봄"은 반증됨)
+               "red_s":  {"wrist": "xy"},
+               "red_in": {"wrist": "xy"}}   # 9/7 신설 — 자리 확인 전 임시(손목캠). z440 에서 어느 캠이 보는지 실측 후 정정                        # 9/7 11:00 실측: red_s 자리에서 손목캠이 기둥 4개(파랑3·노랑1)+든 벽 점을 안정적으로 봄. 새카메라는 벽이 화면 위끝, 측면캠 0개. (9/6 설계 메모의 "손목캠 못 봄"은 반증됨)
 # 정렬 수렴 후 사용자 조그 4회(14:33·14:51·15:31·15:57): dx −0.89/−0.04/−1.00/−0.99, dy −2.18/−1.02/−2.03/−2.50, drz +0.32/+0.88/+0.93/+0.65
 #   → 부호가 전부 같고 크기도 비슷 → 사용자 지시("일률적이면 보정값") 대로 정렬 뒤 고정 보정(로봇 프레임, rz≈180 기준). nudge_log 로 잔차 계속 감시.
-POST_ALIGN_OFFSET = {"blue": (0.0, 0.0, 0.0)}   # 15:57 사용자 조그 자리(=이 보정값 자리)에서 채널 입구 막힘 → 보정 보류(0). 카메라 자리로 하강 시험 후 결정   # 15:35 재기준(사용자 자리·이 파지) 후 손목캠 rz 담당. 조그 3회 모두 손목캠 rz 방향 일치(+1.09/+0.99/+1.26 vs 사용자 +0.32/+0.88/+0.93)
+POST_ALIGN_OFFSET = {"blue": (0.0, 0.0, 0.0)}   # ★9/7 18:5x 빨강 −0.5mm 철회: 최소 실행 이동량(0.8mm)보다 작아
+#   왕복 처리를 타는데 실제로는 +1.0mm 움직여 정렬 온전성 6.0mm 로 멈췄다. 이만한 보정은 z440 기준을 그 자리에서
+#   다시 찍어 반영해야 한다(정렬이 한 번에 그 자리로 간다).   # 15:57 사용자 조그 자리(=이 보정값 자리)에서 채널 입구 막힘 → 보정 보류(0). 카메라 자리로 하강 시험 후 결정   # 15:35 재기준(사용자 자리·이 파지) 후 손목캠 rz 담당. 조그 3회 모두 손목캠 rz 방향 일치(+1.09/+0.99/+1.26 vs 사용자 +0.32/+0.88/+0.93)
 
 
 # ------------------------------------------------------------------ 상태·로그
@@ -381,8 +384,47 @@ def rack_axes(e, Jinv):
     return u, np.array([-u[1], u[0]])
 
 
+# ★9/7 실측(red_s, 노출 500 에서 10회): 5회가 끝점 하나를 놓쳐 길이 362→274/185px 로 줄고 중앙이 44~89px 밀린다.
+#   길이 10% 게이트는 274px 은 걸러도 341px(-5.4%) 은 통과시켜 파지점을 3.3mm 틀리게 잡았다.
+#   → 기준 길이 ±RACK_LEN_TOL 에 드는 측정만 모아 중앙값을 쓴다(채택 5회 산포 x0.6 y1.1px).
+RACK_LEN_TOL = 0.02
+RACK_NEED = 3
+RACK_TRIES = 10
+
+
+def rack_measure(color, L0, x_hint, need=RACK_NEED, tries=RACK_TRIES, tol=RACK_LEN_TOL):
+    """끝점 소실 측정을 버리고 채택분 중앙값을 돌려준다. 채택 need 개 미만이면 (None, 채택수, 마지막)."""
+    import statistics as _s
+    good = []; last = None
+    for _ in range(tries):
+        e = PC.rack_ends(color, x_hint=x_hint)
+        if not e:
+            continue
+        last = e
+        if abs(e["len_px"] - L0) <= tol * L0:
+            good.append(e)
+            if len(good) >= need and len(good) >= 3:
+                break
+    if len(good) < need:
+        return None, len(good), last
+    ang = [((g["ang"] + 90.0) % 180.0) - 90.0 for g in good]
+    out = {"mid": (_s.median([g["mid"][0] for g in good]), _s.median([g["mid"][1] for g in good])),
+           "len_px": _s.median([g["len_px"] for g in good]), "ang": _s.median(ang),
+           "n_dots": good[-1]["n_dots"],
+           "p1": (_s.median([g["p1"][0] for g in good]), _s.median([g["p1"][1] for g in good])),
+           "p2": (_s.median([g["p2"][0] for g in good]), _s.median([g["p2"][1] for g in good])),
+           "n_ok": len(good)}
+    ys = [g["mid"][1] for g in good]
+    out["spread_px"] = float(max(ys) - min(ys))
+    return out, len(good), last
+
+
 def stage_rack(color, teach_rack=False):
     set_stage("2 RACK", color=color)
+    # ★9/7 사고: 벽을 문 채 사이클을 시작하면 랙 위에서 그리퍼를 열어 벽을 떨어뜨린다 → 랙으로 가기 전에 확인.
+    if PC.held_wall_dots_expo(color):
+        raise Gate("그리퍼에 벽이 이미 있습니다 — 랙으로 가면 여기서 열어 떨어뜨립니다. "
+                   "벽을 먼저 내려놓거나 [▶ 든 채로 3단계부터] 로 진행하세요")
     rr = (jload(F["rack"]) or {}).get(color)
     if not rr:
         raise Gate(f"{color} 랙 기준 없음")
@@ -392,24 +434,48 @@ def stage_rack(color, teach_rack=False):
     move([rp[0], rp[1], SAFE_Z, 180.0, 0.0, 180.0], tag="랙 위 SAFE")
     log(f"  그리퍼 열기 → {PC.gripper(rr.get('grip_open', GRIP_OPEN))}")
     move(rp, tag="랙 관측자세")
+    # ★9/7 실측: 랙 관측 노출이 색마다 다르다(red_s 는 500 이라야 양끝이 붙는다). 노출이 낮으면
+    #   점이 하나만 잡혀 카메라를 45mm 옮겨 재관측하는데, 그 이동만으로 각 0.33°·파지 1.4mm 가 틀어진다.
+    #   → 색별로 '통했던 노출'을 기준에 저장해 두고 관측 전에 먼저 맞춘다.
+    if rr.get("expo"):
+        try:
+            if abs(float(HA.current_expo() or 0) - float(rr["expo"])) > 1.0:
+                HA.set_expo(float(rr["expo"])); time.sleep(0.6)
+            log(f"  (랙 관측 노출 {float(rr['expo']):.0f} 로 맞춤 — 기준 촬영과 같은 노출)")
+        except Exception as ex:
+            log(f"  (랙 노출 맞춤 실패: {ex})")
     L0 = rr["len0_px"]; dxy = (0.0, 0.0); e = None
     for rnd in range(3):                                          # 14:42 실기: 벽이 프레임 아래끝(y707/720)까지 밀려 끝점 잘림 → 길이 −16% 정지 → 카메라를 옮겨 재관측
         cur = PC.st()["tcp"]; dxy = (cur[0] - rp[0], cur[1] - rp[1])
         J = np.linalg.inv(Jinv)
         x_hint = rr["Pc0"][0] + float((J @ np.array(dxy))[0])
-        e = PC.rack_ends(color, x_hint=x_hint)                    # 부품(4프레임, 같은 색 여러 벽이면 x 로 선택)
-        if not e or abs(e["len_px"] - L0) > 0.10 * L0:
+        e, n_ok, last = rack_measure(color, L0, x_hint)           # 부품 + 끝점소실 배제 중앙값
+        if e:
+            log(f"  (랙 측정: 길이 ±{RACK_LEN_TOL*100:.0f}% 채택 {n_ok}회 중앙값 — 중앙 세로산포 {e['spread_px']:.1f}px)")
+        else:
+            log(f"  (랙 측정: 채택 {n_ok}회 < {RACK_NEED} — 끝점 소실 잦음, 노출 사다리로 재시도)")
+            e = None
+        if not e:
             # 9/7: 랙은 베이스보다 멀고 어두워 관측자세 저노출(42~83)에선 색점이 안 보인다(파랑 0개) → 노출 사다리로 찾는다.
             keep = HA.current_expo()
-            for ex in (167, 250, 333, 83):
-                HA.set_expo(ex)
-                e2 = PC.rack_ends(color, x_hint=x_hint)
-                if e2 and abs(e2["len_px"] - L0) <= 0.10 * L0:
-                    log(f"  (랙 관측: 노출 {ex} 로 올려 벽 양끝 확보 — 길이 {e2['len_px']:.0f}px)")
-                    e = e2; break
+            for ex in (500, 417, 333, 250, 167, 83, 42):   # 9/7: red_s 는 빨간 점이 작고 어두워 500 이라야 양끝이 안정적으로 붙는다
+                HA.set_expo(ex); time.sleep(0.5)
+                e2, n2, _ = rack_measure(color, L0, x_hint)
+                if e2:
+                    log(f"  (랙 관측: 노출 {ex} 로 벽 양끝 확보 — 채택 {n2}회 길이 {e2['len_px']:.0f}px)")
+                    e = e2
+                    try:                                   # 통한 노출은 기준에 기억시켜 다음 사이클은 처음부터 맞춘다
+                        _all = jload(F["rack"]) or {}
+                        if _all.get(color, {}).get("expo") != ex:
+                            _all.setdefault(color, {})["expo"] = ex
+                            jsave(F["rack"], _all); rr["expo"] = ex
+                            log(f"  (랙 노출 {ex} 를 {color} 기준에 저장)")
+                    except Exception:
+                        pass
+                    break
             else:
                 if keep: HA.set_expo(keep)
-        ok = bool(e) and abs(e["len_px"] - L0) <= 0.10 * L0
+        ok = bool(e) and abs(e["len_px"] - L0) <= RACK_LEN_TOL * L0
         if ok:
             break
         c, n = PC._rack_color_center(color, x_hint)
@@ -423,8 +489,8 @@ def stage_rack(color, teach_rack=False):
         PC.speed(SPD_MOVE); move([cur[0] + float(d[0]), cur[1] + float(d[1]), rp[2]] + list(rp[3:]), tag="랙 재관측 XY"); time.sleep(0.5)
     if not e:
         raise Gate("랙에서 벽 양끝을 못 잡음 — 벽이 뒤집혔거나 점 가림. 랙에 다시 놓기")
-    if abs(e["len_px"] - L0) > 0.10 * L0:
-        raise Gate(f"벽 길이 불일치 {e['len_px']:.0f}px vs 기준 {L0:.0f}px ({(e['len_px']-L0)/L0*100:+.0f}%) — 끝점 미검출, 파지 금지")
+    if abs(e["len_px"] - L0) > RACK_LEN_TOL * L0:
+        raise Gate(f"벽 길이 불일치 {e['len_px']:.0f}px vs 기준 {L0:.0f}px ({(e['len_px']-L0)/L0*100:+.1f}%) — 끝점 미검출, 파지 금지")
     if abs(dxy[0]) + abs(dxy[1]) > 0.5:
         log(f"  (랙 재관측 카메라 오프셋 Δ ({dxy[0]:+.1f},{dxy[1]:+.1f})mm 반영)")
     # 15:39 실기: 양끝 p1/p2 순서가 x 몇 px 차이로 뒤집혀 각 +178° (방향 반전) → '삐뚤게 놓임' 오판. 벽은 방향 없는 선분:
@@ -448,7 +514,8 @@ def stage_rack(color, teach_rack=False):
     rot = [180.0, 0.0, rz]
     R = {"mid": e["mid"], "len_px": e["len_px"], "ang": e["ang"], "dang": dang, "n_dots": e["n_dots"], "grip_xy": (gx, gy), "offset": off, "made": time.strftime("%H:%M:%S")}
     with LOCK: S["rack"] = R
-    log(f"  랙: 중앙 ({e['mid'][0]:.0f},{e['mid'][1]:.0f}) 길이 {e['len_px']:.0f}px 각 {e['ang']:+.2f}°(Δ{dang:+.2f}) → 파지 XY ({gx:.2f},{gy:.2f}) 보정 along {off['along']:+.2f} across {off['across']:+.2f}")
+    _gm = {"mid_dot": "가운데 점", "ends_mid": "끝점 중점(가운데 점 미검출)"}.get(e.get("grip_mode", "ends_mid"), "?")
+    log(f"  랙: 파지기준={_gm} ({e['mid'][0]:.0f},{e['mid'][1]:.0f}) 점 {e.get('n_dots','?')}개 길이 {e['len_px']:.0f}px 각 {e['ang']:+.2f}°(Δ{dang:+.2f}) → 파지 XY ({gx:.2f},{gy:.2f}) 보정 along {off['along']:+.2f} across {off['across']:+.2f}")
     zp = rr["z_pick"]
     PC.speed(SPD_MOVE); move([gx, gy, rp[2]] + rot, tag="파지 XY 위")
     PC.speed(SPD_DESC); move([gx, gy, zp + 40] + rot, tag="픽 −40")
@@ -470,6 +537,20 @@ def stage_rack(color, teach_rack=False):
 
 
 def grasp_check(color, rack_dang, g_close, gr):
+    # ★9/7 실측: 같은 파지·같은 자세에서 노출만 바꿔도 든 벽 점 중심이 12.8px(≈2.5mm) 움직인다(면적 541↔1733).
+    #   서명을 찍은 노출과 다른 노출에서 재면 '가짜 파지 편차'가 나온다 → 서명 노출로 맞추고 잰다.
+    try:
+        _sig = (PC.load_grasp_ref(color) or {})
+        _e = _sig.get("expo")
+        if _e:
+            import hover_align as _HA
+            if abs(float(_HA.current_expo() or 0) - float(_e)) > 1.0:
+                _HA.set_expo(float(_e)); time.sleep(0.6)
+                log(f"  (파지 편차: 서명 촬영 노출 {float(_e):.0f} 로 맞춤)")
+        else:
+            log("  (파지 편차: 서명에 촬영 노출이 없음 — 값 신뢰도 낮음, 재촬영 권장)")
+    except Exception as ex:
+        log(f"  (파지 편차 노출 정렬 실패: {ex})")
     """든 벽 점 ↔ 좋은 파지 서명. 서명 없으면 사용자 확인 후 저장(버튼). 게이트 1.0mm/0.3°."""
     if PC.load_grasp_ref(color) is None:
         wait_user(f"{color} 좋은 파지 서명 없음: 파지가 정상이면 [파지 서명 저장] → 계속 (아니면 중단)")
@@ -524,6 +605,9 @@ def stage_carry_hover(color, T):
     A.update(x=cur[0], y=cur[1], rz=cur[5], z=cur[2], made_t=time.time(), made=time.strftime("%H:%M:%S"))
     with LOCK: S["align"] = A
     log(f"  정렬 후 TCP x {cur[0]:.2f} y {cur[1]:.2f} rz {cur[5]:+.2f} z {cur[2]:.1f}")
+    # ★9/7 14:57 파랑: 정렬이 슬롯 기준에서 6.0mm 옮겨 놓아 안 들어갔다. 이 게이트는 그때 이미 코드에 있었는데
+    #   어디서도 호출되지 않아 못 잡았다(로그에 '정렬 온전성' 줄이 한 번도 없음) → 여기서 호출한다.
+    check_align_sanity(color, cur)
     return A
 
 
@@ -647,6 +731,12 @@ def promote_seat_ref(color):
             img = HA.grab(cand)
             d = {c: [[float(q[0]), float(q[1]), float(q[2])] for q in HA._blobs(img, c, 20, cand)
                      if 300 <= q[0] <= 1220 and 60 <= q[1] <= 660] for c in ("blue", "yellow", "red")}   # x<300 은 새카메라 왼쪽 케이블 반사 구역
+            # ★9/7 19:1x·19:36 실기: 승격된 안착 기준에 빨강이 4~6개 들어와(밑판 가장자리·반사) 판정이 늘 실패했다.
+            #   안착 자세에서 한 꼭짓점이 주는 점은 색당 1~2개다 → 3개 이상인 색은 반사로 보고 통째로 버린다.
+            for c in list(d):
+                if len(d[c]) > 2:
+                    log(f"  (안착 기준: {c} {len(d[c])}개 — 반사로 보고 제외)")
+                    d[c] = []
             if sum(len(v) for c, v in d.items() if c != wall_c) >= 2:      # 벽 색 말고 기둥 점 2개 이상
                 src, dots = cand, d; break
         if not dots:
@@ -1128,7 +1218,7 @@ pre{background:#000;padding:8px;height:260px;overflow:auto;font-size:12px}table{
 .card{display:inline-block;vertical-align:top;background:#1c1c1c;padding:8px;margin:4px;border-radius:6px;min-width:260px}</style>
 <h2>HOUSE CYCLE <small id=tcp></small></h2>
 <div class=st>단계: <b id=stage>-</b> <span id=wait class=wait></span></div>
-<div>색: <select id=color><option>blue<option>yellow<option>red<option>red_s</select>
+<div>색: <select id=color onchange="try{localStorage.setItem('hc_color',this.value)}catch(e){}"><option>blue<option>yellow<option>red<option>red_s</select>
  <button class=big onclick="cmd('start')">▶ 사이클(1→2→2')</button>
  <button onclick="cmd('start',{teach:1})">▶ 사이클 + 랙 파지 티칭</button>
  <button onclick="cmd('resume_held')">▶ 든 채로 3단계부터(운반→z440 정렬→하강 대기)</button>
@@ -1154,6 +1244,7 @@ pre{background:#000;padding:8px;height:260px;overflow:auto;font-size:12px}table{
 const $=id=>document.getElementById(id);
 async function cmd(op,extra={}){const p=new URLSearchParams({op,color:$('color').value,...extra});const r=await fetch('/cmd?'+p).then(r=>r.json());if(!r.ok)alert(r.err);}
 function f(o){return o?JSON.stringify(o,(k,v)=>typeof v==='number'?+v.toFixed(2):v).replace(/[{}"]/g,'').replace(/,/g,'  '):'-'}
+try{const _c=localStorage.getItem('hc_color'); if(_c) $('color').value=_c;}catch(e){}   /* 9/7: 서버 재시작마다 색이 blue 로 리셋돼 엉뚱한 색으로 동작하는 사고가 반복 — 마지막 선택을 기억 */
 async function poll(){try{const s=await fetch('/state').then(r=>r.json());
  $('stage').textContent=s.stage+(s.err?'  ✖ '+s.err:'')+(s.run4?`  [run4 ${s.run4.idx+1}/${s.run4.order.length} ${s.run4.order[s.run4.idx]} 완료:${s.run4.done.join(',')||'-'}${s.run4.active?'':' 종료'}]`:'');
  $('stage').style.color=s.stage.startsWith('SEAT FAIL')?'#f66':'';$('wait').textContent=s.wait?'⏸ '+s.wait:'';
