@@ -59,25 +59,32 @@ DET = {"wrist":  {"amin_wall": 150, "feat_area": (60, 3200), "near": 80.0, "sear
                   # 측면 빨간 기둥점 H 0~5(라이브 실측, 랩어라운드) → 두 구간 합집합
                   "ranges": {"blue": ((95, 120, 80), (125, 255, 255)), "yellow": ((15, 60, 100), (40, 255, 255)),
                              "red": [((0, 60, 60), (12, 255, 255)), ((160, 60, 60), (180, 255, 255))]},
-                  "exclude": [(740, 410, 820, 500), (1150, 60, 1280, 320), (820, 560, 980, 720)]}}   # 9/7 1280×720 좌표(옛 640×480 값 2배) + 창 반사·바닥 반사(면적 1600·2192) 제외          # 검은 상자 위 파란 점(고정물, 베이스 아님) 제외
+                  "exclude": [(740, 410, 820, 500), (1150, 60, 1280, 320), (820, 560, 980, 720), (250, 495, 405, 600)]}}   # 9/7 1280×720 좌표(옛 640×480 값 2배) + 창 반사·바닥 반사(면적 1600·2192) 제외          # 검은 상자 위 파란 점(고정물, 베이스 아님) 제외
 HELD_BOX = (820, 0, 1280, 720)                  # 손목캠에서 든 벽이 보이는 영역(ref 생성 시)
 SCALE_TOL, RMS_TOL_PX = 0.03, 6.0
 MAX_STEP_MM, MAX_STEP_DEG = 3.0, 0.5
 TOL_MM, TOL_DEG = 0.3, 0.15
 COMBINE_TOL_MM, COMBINE_TOL_DEG = 1.5, 0.6
+MIN_EXEC_MM = 0.8                               # 로봇 최소 실행 이동량(실측). 이보다 작은 보정은 명령해도 왜곡돼 실행된다
 MAX_ITER = 10                                   # 스텝 ≤3mm 라 20mm 급 초기 오차(회전 중심 버그 전) 도 수렴하게
 # ★z440 노출: 관측자세(z650)용 417 이면 가까워진 기둥 점이 하얗게 날아간다(9/6 00:5x 라이브: 노랑 S4·V255, 파랑 H90·V251 → 검출 0).
 #   이것이 "벽 물고 가까워지면 기둥점·벽점 인식 안 됨"의 원인. 라이브 재현(00:5x, 관측 노출 417): 333/250/167 은 파랑만, 83 에서 파랑+노랑.
 #   호버 정렬은 플리커 안전값 사다리(250·167·83)를 전부 시도해 기준 특징이 가장 많이 매칭되는 노출을 고르고, 끝나면 관측 노출로 복원.
-HOVER_EXPO_LADDER = (250, 167, 83)
+# ★9/7 실측(red_s z440): 벽 점이 208 부터 보이기 시작해 500 에서 면적 2040 으로 안정된다(250 은 330~0 으로 경계).
+#   사다리가 250·167·83 로 내려가기만 해서 red_s 는 늘 경계 노출에 걸렸고, 노출이 바뀌면 점 중심이 23px(4.2mm) 움직여
+#   가짜 정렬 오차가 났다 → 위쪽까지 넓히고, 같은 매칭 수면 벽 점이 큰 노출을 고른다.
+HOVER_EXPO_LADDER = (250, 167, 83, 333, 417, 500)
 NEWCAM_MAP = SRC["newcam"]["map"]
 WALL_DOT_HSV = {
     "blue":   ((95, 150, 140), (115, 255, 255)),
     "yellow": ((15, 80, 110), (38, 255, 255)),
     # 9/6 20:2x 실측(빨강 긴 벽 든 손목캠): 빨강 점 H 가 175 를 넘어가 조각남(306+240px) → 상한 179 로 하나(2424px).
     #   0~8 구간까지 더해도 차이 없어 단일 범위 유지(place_calc 6곳이 lo,hi 튜플을 그대로 씀).
-    "red":    ((135, 90, 55), (179, 255, 255)),
-    "red_s":  ((135, 90, 55), (179, 255, 255)),
+    # ★9/7 18:4x: place_calc 만 고치고 여기를 빠뜨려 정렬 쪽은 계속 한쪽 구간만 봤다(같은 표가 두 군데 있는 문제).
+    #   빨강 벽 점 실측 색상은 H 3~17 로 0쪽이다. 색상환 양쪽을 다 봐야 한다(노랑 H15~ 와 겹치지 않게 상한 12).
+    "red":    [((135, 90, 55), (179, 255, 255)), ((0, 90, 55), (12, 255, 255))],
+    "red_s":  [((135, 90, 55), (179, 255, 255)), ((0, 90, 55), (12, 255, 255))],
+    "red_in": [((135, 90, 55), (179, 255, 255)), ((0, 90, 55), (12, 255, 255))],
 }
 
 
@@ -164,6 +171,59 @@ def measure(img, color, ref=None, seeds=None, src="wrist"):
     return {"wall": [(q[0], q[1], q[2]) for q in w], "pillars": base_feats(img, w, src)}, None
 
 
+MULTI_N = 5             # 정렬 측정에 쓸 프레임 수
+MULTI_MERGE_PX = 15.0   # 이 안이면 같은 특징으로 본다
+MULTI_MIN_SEEN = 2      # 이 횟수 이상 보인 특징만 채택(유령 배제)
+
+
+def measure_multi(color, ref=None, seeds=None, src="wrist", n=MULTI_N):
+    """★9/7 사용자 지시("게이트는 엄격하게, 검출을 보강하라"):
+    호버 정렬은 지금까지 **한 장**만 보고 판단해 점 하나가 깜빡이면 바로 실패했다.
+    랙(rack_ends)·베이스(pillars_px)는 이미 여러 프레임을 모은다 → 정렬도 같게 한다.
+    n 장을 찍어 같은 색·MULTI_MERGE_PX 안의 검출을 하나로 묶고, MULTI_MIN_SEEN 회 이상 보인 것만
+    중앙값 좌표로 채택한다. 게이트(기준 개수 전부·축척·rms)는 그대로 둔다."""
+    import statistics as _s
+    accP, accW, ok = [], [], 0
+    for _ in range(n):
+        m, why = measure(grab(src), color, ref, seeds, src)
+        if not m:
+            time.sleep(0.08); continue
+        ok += 1
+        accP.append(m["pillars"]); accW.append(m["wall"])
+        time.sleep(0.08)
+    if not ok:
+        return None, f"[{src}] {n}프레임 모두 측정 실패"
+
+    def merge(lists, colored):
+        groups = []
+        for fi, lst in enumerate(lists):
+            for q in lst:
+                col = q[0] if colored else None
+                x, y = (q[1], q[2]) if colored else (q[0], q[1])
+                a = q[3] if colored else q[2]
+                for g in groups:
+                    if g["col"] == col and math.hypot(x - g["x"][-1], y - g["y"][-1]) <= MULTI_MERGE_PX:
+                        g["x"].append(x); g["y"].append(y); g["a"].append(a); g["f"].add(fi); break
+                else:
+                    groups.append({"col": col, "x": [x], "y": [y], "a": [a], "f": {fi}})
+        out = []
+        for g in groups:
+            if len(g["f"]) < min(MULTI_MIN_SEEN, ok):
+                continue
+            mx, my, ma = _s.median(g["x"]), _s.median(g["y"]), int(_s.median(g["a"]))
+            out.append((g["col"], mx, my, ma) if colored else (mx, my, ma))
+        return out
+
+    P, W = merge(accP, True), merge(accW, False)
+    W.sort(key=lambda q: (q[1], q[0]))
+    if not W:
+        return None, f"[{src}] 든 벽 점 0개({ok}/{n}프레임)"
+    n_min = min(len(p) for p in accP) if accP else 0
+    if len(P) > n_min:
+        print(f"  ({src} 다중프레임: 기둥 특징 {n_min}→{len(P)}개로 보강, {ok}/{n}프레임)", flush=True)
+    return {"wall": W, "pillars": P}, None
+
+
 def current_expo():
     """지금 손목캠 노출값(없으면 None)."""
     try:
@@ -180,6 +240,39 @@ def set_expo(val):
         CL.expo(set=int(val)); time.sleep(0.9); return True
     except Exception as e:
         print("  ⚠ 노출 설정 실패:", e); return False
+
+
+def expo_for_area(color, target_area, src="wrist", tries=6, tol=0.30, lo=42.0, hi=2000.0):
+    """★9/7 사용자 지적("노출을 숫자로 고정하지 말고 밝기에 맞춰 자동으로"):
+    노출 숫자를 고정하면 조명이 바뀔 때마다 어긋난다(오늘 red_s 기준 250 ↔ 실제 필요 500).
+    카메라 자동노출은 9/2 에 실패한 길이다(AWB/AE 를 켜면 색조가 흘러 파랑 검출 2~4개 왕복, 면적 편차 319).
+    → 대신 **점이 기준과 같은 크기로 보일 때까지** 노출을 자동으로 맞춘다. 기준마다 면적이 이미 저장돼 있어
+      다시 등록할 필요가 없고, 같은 크기로 보이면 중심도 같은 자리를 가리킨다(면적 617→2038 일 때 중심 23px 이동).
+    반환 (맞춘 노출, 그때 면적) / 실패 (None, None)."""
+    if not target_area or target_area <= 0:
+        return None, None
+    e = float(current_expo() or 250.0)
+    best = None
+    for _ in range(tries):
+        e = max(lo, min(hi, e))
+        set_expo(e)
+        q = wall_dots(grab(src), color, None, None, src)
+        a = max([p[2] for p in q], default=0)
+        if a > 0:
+            r = a / float(target_area)
+            if best is None or abs(math.log(max(r, 1e-6))) < abs(math.log(max(best[2] / float(target_area), 1e-6))):
+                best = (e, a, a)
+            if abs(r - 1.0) <= tol:
+                print(f"  (노출 자동: 점 면적 {a} ≈ 기준 {int(target_area)} → 노출 {e:.0f} 채택)", flush=True)
+                return e, a
+            e = e / (r ** 0.7)          # 면적은 노출에 대략 비례 — 0.7 지수로 부드럽게 수렴
+        else:
+            e = e * 1.6                  # 점이 안 보이면 밝게
+    if best:
+        set_expo(best[0])
+        print(f"  (노출 자동: 최선 면적 {best[1]} vs 기준 {int(target_area)} → 노출 {best[0]:.0f})", flush=True)
+        return best[0], best[1]
+    return None, None
 
 
 def restore_expo():
@@ -201,8 +294,9 @@ def pick_hover_expo(color, ref):
         meas, why = measure(grab("wrist"), color, ref, None, "wrist")
         nw = len(meas["wall"]) if meas else 0
         nm = len(match_feats(ref["pillars"], meas["pillars"], DET["wrist"]["search"])[0]) if meas else 0
-        print(f"  호버 노출 {e}: 벽 점 {nw} 매칭 특징 {nm}")
-        key = (nm, nw)
+        wa = int(max([q[2] for q in meas["wall"]], default=0)) if meas else 0
+        print(f"  호버 노출 {e}: 벽 점 {nw}(면적 {wa}) 매칭 특징 {nm}")
+        key = (nm, nw, wa)          # 매칭 수 → 벽 점 수 → 벽 점 면적(경계 노출 회피)
         if nw >= 1 and nm >= 2 and (best is None or key > best[0]):
             best = (key, e)
     if best is None:
@@ -281,6 +375,11 @@ def jinv_for(src, z_tcp, rz_tcp):
     return J, m.get("rot_sign", -1.0)
 
 
+WALL_COLUMN_PX = 80.0      # 든 벽 점과 같은 x 열(±이 값) 의 같은 색 특징은 벽의 것 → 기준에서 뺀다
+SAME_COLOR_NEAR_PX = 60.0  # 든 벽 점 이 거리 안의 같은 색 '기둥 특징'은 반사/벽 자신으로 보고 기준에서 뺀다
+COLLINEAR_PERP_PX = 25.0   # 매칭 특징의 직선 대비 수직 퍼짐이 이보다 좁으면 회전을 풀지 않는다
+
+
 def delta(ref, meas, z_tcp, rz_tcp, src="wrist"):
     s_, d_, lab = match_feats(ref["pillars"], meas["pillars"], DET[src]["search"])
     if len(s_) < 1:
@@ -292,6 +391,34 @@ def delta(ref, meas, z_tcp, rz_tcp, src="wrist"):
         lab = lab + ["(1특징: 평행이동만)"]
     else:
         sim = similarity(s_, d_)
+    # ★9/7 실기(red_s z440): 기둥 4점 중 파란 점 하나가 가려져 면적 222→149, 25px 밀리면서
+    #   두 점 간격이 176→147px 로 보여 축척 0.966 → 정렬 자체가 실패했다(나머지 3점은 1.010 으로 정상).
+    #   → 4점 이상이면 최악의 한 점을 빼고 다시 맞춰 본다(3점 이상 남을 때만, 게이트를 통과할 때만 채택).
+    if len(s_) >= 4 and (abs(sim[0] - 1.0) > SCALE_TOL or sim[4] > RMS_TOL_PX):
+        # 전체 맞춤의 잔차가 가장 큰 한 점(=가려진 점)을 빼고 한 번만 다시 맞춘다.
+        res = np.linalg.norm(apply_sim(sim, [(x, y, 0) for x, y in s_]) - np.array(d_, float), axis=1)
+        k = int(np.argmax(res))
+        s2 = [q for i, q in enumerate(s_) if i != k]; d2 = [q for i, q in enumerate(d_) if i != k]
+        try:
+            sim2 = similarity(s2, d2)
+        except Exception:
+            sim2 = None
+        if sim2 and abs(sim2[0] - 1.0) <= SCALE_TOL and sim2[4] <= RMS_TOL_PX:
+            lab = [l for i, l in enumerate(lab) if i != k] + [f"(이상점 1개 제외 잔차 {res[k]:.0f}px: {lab[k]})"]
+            sim, s_, d_ = sim2, s2, d2
+    # ★9/7 실기(red_s z440, 발산 1.33→3.60mm): 특징이 3개로 줄면 남은 점들이 거의 한 직선 위에 놓인다
+    #   (blue 861,481 · blue 1070,484 · yellow 810,468 → 수직 퍼짐 10px). 직선에서는 회전이 결정되지 않아
+    #   실제 0.2° 를 θ=+5.32° 로 읽고 벽 기대위치를 망친다 → 수직 퍼짐이 좁으면 평행이동만 쓴다.
+    if len(s_) >= 2:
+        P = np.array(s_, float); P = P - P.mean(axis=0)
+        try:
+            perp = float(np.linalg.svd(P, compute_uv=False)[-1]) / max(1.0, np.sqrt(len(P)))
+        except Exception:
+            perp = 999.0
+        if perp < COLLINEAR_PERP_PX:
+            t = np.array(d_, float).mean(axis=0) - np.array(s_, float).mean(axis=0)
+            sim = (1.0, 0.0, float(t[0]), float(t[1]), float(sim[4]))
+            lab = lab + [f"(특징이 거의 일직선 수직퍼짐 {perp:.0f}px < {COLLINEAR_PERP_PX} → 회전 포기, 평행이동만)"]
     s, th, tx, ty, rms = sim
     if abs(s - 1.0) > SCALE_TOL:
         return None, f"[{src}] 특징 축척 {s:.3f} — 기준과 높이/거리가 다름"
@@ -369,6 +496,25 @@ def save_ref(color, src="wrist", seeds=None, img=None):
         raise RuntimeError(f"[{src}] 베이스 특징 {len(meas['pillars'])}개 — 이 자세에선 기준을 못 만든다(둘 다 보이는 자세 필요)")
     if len(meas["wall"]) < 2:
         print(f"  ⚠ [{src}] 든 벽 점 {len(meas['wall'])}개 — 위치만 정렬, 회전은 다른 카메라/랙 각으로")
+    # ★9/7 실기(red_s): 든 벽 점 바로 옆(26px)에 같은 색 반사가 잡혀 '기둥 특징'으로 기준에 박혔다.
+    #   벽 점과 같은 색이라 다음 정렬에서 벽 점을 이 특징에 짝지을 수 있다 → 벽 점 근처의 같은 색 특징은 기준에서 뺀다.
+    wcol = "red" if color in ("red", "red_s") else color
+    if meas["wall"]:
+        keep = []
+        for q in meas["pillars"]:
+            if q[0] == wcol and any(math.hypot(q[1] - w[0], q[2] - w[1]) <= SAME_COLOR_NEAR_PX for w in meas["wall"]):
+                print(f"  (기준에서 제외: 든 벽 점 {SAME_COLOR_NEAR_PX:.0f}px 안의 같은 색 특징 {q[0]}({q[1]:.0f},{q[2]:.0f}) area {q[3]})")
+                continue
+            # ★9/7 16:4x 실기(파랑): 든 벽의 **반대쪽 끝 점**(1027,702)과 그 조각 2개가 '기둥 특징'으로 저장됐다.
+            #   기준 벽 점(1027,279)에서 423px 떨어져 위 규칙을 빠져나갔다. 든 벽의 점들은 같은 색이고
+            #   화면에서 거의 같은 x 열(±20px)에 세로로 늘어선다 → 그 열의 같은 색은 벽의 것으로 보고 뺀다.
+            if q[0] == wcol and any(abs(q[1] - w[0]) <= WALL_COLUMN_PX for w in meas["wall"]):
+                print(f"  (기준에서 제외: 든 벽과 같은 x열의 같은 색 특징 {q[0]}({q[1]:.0f},{q[2]:.0f}) area {q[3]})")
+                continue
+            keep.append(q)
+        meas["pillars"] = keep
+        if len(meas["pillars"]) < 2:
+            raise RuntimeError(f"[{src}] 같은 색 특징 제외 후 베이스 특징 {len(meas['pillars'])}개 — 기준 저장 불가")
     tcp = st()["tcp"]
     d = json.load(open(REF)) if os.path.exists(REF) else {}
     expo = None
@@ -438,7 +584,7 @@ def check(color, srcs=None, roles=None):
             except Exception:
                 pass
         img = grab(src)
-        meas, why = measure(img, color, ref, None, src)
+        meas, why = measure_multi(color, ref, None, src)      # ★단발 → 다중프레임 병합
         if src == "wrist" and (not meas or len(meas["pillars"]) < 2) and not check.expo_done:
             check.expo_done = True
             if pick_hover_expo(color, ref) is not None:
@@ -449,14 +595,18 @@ def check(color, srcs=None, roles=None):
         #   멈추기 전에 노출 사다리로 되찾아 본다 — 못 찾을 때만 정지.
         if src == "wrist" and len(meas["pillars"]) < len(ref["pillars"]):
             keep = current_expo()
-            for e in ([float(ref["expo"])] if ref.get("expo") else []) + list(HOVER_EXPO_LADDER) + [333.0]:
+            for e in ([float(ref["expo"])] if ref.get("expo") else []) + list(HOVER_EXPO_LADDER):
                 set_expo(e)
-                m2, _w2 = measure(grab(src), color, ref, None, src)
+                m2, _w2 = measure_multi(color, ref, None, src)
                 if m2 and len(m2["pillars"]) >= len(ref["pillars"]):
                     print(f"  (기둥 특징 {len(meas['pillars'])}→{len(m2['pillars'])}개: 노출 {e:.0f} 로 되찾음)", flush=True)
                     meas = m2; break
             else:
                 if keep: set_expo(keep)
+        # ★9/7 16:2x 사용자 지적으로 원복: 이 '기준 개수 전부' 요구는 까다로움이 아니라
+        #   **기준이 지금 화면과 안 맞는다는 것을 알려 주는 감지기**다. 60%로 풀었더니 3/5 로 계산해
+        #   10mm 짜리 엉뚱한 보정을 내놓았다(파랑 15:42 기준이 15:56 픽 변경보다 앞서 낡았던 것).
+        #   개수가 모자라면 푸는 게 아니라 기준을 다시 찍는 것이 맞다.
         if len(meas["pillars"]) < len(ref["pillars"]):
             return None, per, (f"[{src}] 기둥 특징 {len(meas['pillars'])}개 < 기준 {len(ref['pillars'])}개 — "
                                f"노출 사다리로도 못 되찾음(기준 노출 {ref.get('expo')}). 좌표계가 틀어져 정지")
@@ -516,6 +666,13 @@ def align(color, dry=False, tol_mm=TOL_MM, tol_deg=TOL_DEG, srcs=None, roles=Non
         print(f"  호버정렬 {it}: 결합 XY ({C['dmm'][0]:+.2f},{C['dmm'][1]:+.2f}) rz {C['drz']:+.2f}° [{C['n_src']}캠, rz {C['rz_from']}]", flush=True)
         if e_mm <= tol_mm and e_deg <= tol_deg:
             print(f"  ✅ 호버 정렬 수렴 ({e_mm:.2f}mm, {e_deg:.2f}°)"); return True
+        # ★9/7 18:3x 실측: 명령 (-0.75,+0.82)mm 에 실제 이동이 (+0.30,+1.30)mm — x 는 방향까지 반대였다.
+        #   로봇의 최소 실행 이동량(≈0.8mm)보다 작은 명령은 제대로 실행되지 않아 잔차를 만들고,
+        #   그 잔차가 다음 측정을 키워 '발산'으로 보인다. **실행할 수 없는 크기는 명령하지 않는다.**
+        #   (게이트 완화가 아니다 — 정렬 결과는 그대로 정렬 온전성 게이트가 다시 검사한다.)
+        if e_mm < MIN_EXEC_MM and e_deg <= tol_deg:
+            print(f"  ✅ 호버 정렬 한계 수렴 ({e_mm:.2f}mm < 최소 실행 이동 {MIN_EXEC_MM}mm — 더 줄일 수 없음)")
+            return True
         # 15:44 실기: 18.6→14.2mm 로 줄고 있는데 rz 0.05→0.17°(손목캠 잡음) 로 '발산' 오판 → 각은 0.3° 이하 변동은 무시
         if prev is not None and (e_mm > prev[0] * 1.2 + 0.2 or (e_deg > 0.3 and e_deg > prev[1] * 1.2 + 0.1)):
             raise RuntimeError(f"호버 정렬 발산({prev[0]:.2f}→{e_mm:.2f}mm, {prev[1]:.2f}→{e_deg:.2f}°) — 부호/매핑 의심, 정지")

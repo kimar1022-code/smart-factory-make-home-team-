@@ -32,6 +32,10 @@ if ! pgrep -f "rack_view.p[y]" >/dev/null 2>&1; then
   nohup python3 "$HOME/bf2_console/tools/rack_view.py" > "$HOME/bf2_console/logs/rack_view.log" 2>&1 &
   echo "  랙 관측 뷰 기동(:8774)"
 fi
+if ! pgrep -f "ref_view.p[y]" >/dev/null 2>&1; then
+  nohup python3 "$HOME/bf2_console/tools/ref_view.py" > "$HOME/bf2_console/logs/ref_view.log" 2>&1 &
+  echo "  ★9/7 기준점 뷰 기동(:8777, 손목캠에 단계별 기준점 오버레이)"
+fi
 if ! pgrep -f "house_cycle.p[y]" >/dev/null 2>&1; then
   nohup python3 "$HOME/bf2_console/tools/house_cycle.py" > "$HOME/bf2_console/logs/house_cycle.log" 2>&1 &
   echo "  ★9/6 재설계 사이클 서버 기동(:8776, 버튼: 티칭·사이클·하강·중단)"

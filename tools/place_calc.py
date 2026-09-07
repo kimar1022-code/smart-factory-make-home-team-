@@ -25,7 +25,7 @@ BR = "http://127.0.0.1:8765"
 CAL = "/home/ar/bf2_console/dot_calib.json"
 OBS = [200.0, -330.0, 650.0, 180.0, 0.0, 180.0]      # 관측자세(매핑 기준)
 SAFE_Z, HOVER_Z = 650.0, 478.0
-SEAT_Z = {"blue": 355.0, "yellow": 354.0, "red": 353.0, "red_s": 351.0}   # 9/2~3 골든 안착 z
+SEAT_Z = {"blue": 355.0, "yellow": 354.0, "red": 353.0, "red_s": 351.0, "red_in": 353.0}   # 9/2~3 골든 안착 z
 SPD_MOVE, SPD_DESC, SPD_SEAT = 30, 10, 3
 
 
@@ -100,25 +100,52 @@ def load_grasp_ref(color):
     return None
 
 
+def _held_blobs(img, ranges, area, x_min, x_max=1270, y_min=8, y_max=715, merge_px=45.0):
+    """든 벽의 색점 — ★9/7 실측(red_s): 점이 작고 어두워 같은 점이 한 프레임에서는 면적 712 한 덩어리,
+    다음 프레임에서는 338+258 두 조각으로 갈라진다. 면적 하한 500 을 조각 하나씩 재면 '벽 점 0개'가 되어
+    파지 편차를 못 재고 정지한다 → 하한의 1/4 이상 조각을 먼저 모아 merge_px 안이면 합친 뒤 면적을 판정한다.
+    밝기 가중 중심을 쓰므로 합쳐도 중심 정의는 그대로다."""
+    import cv2, numpy as np
+    m = _mask_ranges(img, ranges)
+    n, lab, stt, cen = cv2.connectedComponentsWithStats(m)
+    g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    frag = []
+    floor = max(100.0, area[0] * 0.25)
+    H, W = m.shape[:2]
+    x_max = min(x_max, W - 2); y_max = min(y_max, H - 2)
+    for i in range(1, n):
+        a = int(stt[i, 4]); x, y = cen[i]
+        if a < floor or a > area[1] * 2 or x < x_min or x > x_max or y < y_min or y > y_max:
+            continue
+        # ★9/7: 파랑 서명이 y 695.8(창 상한 700)에서 찍혀 점 아래가 잘렸다 → 중심이 위로 밀리고 면적이 준다.
+        #   프레임 가장자리에 닿은 덩어리는 경고만 남기고 쓴다(버리면 '벽 점 0개'가 되어 더 나쁘다).
+        x0b, y0b, wb, hb = int(stt[i, 0]), int(stt[i, 1]), int(stt[i, 2]), int(stt[i, 3])
+        if x0b <= 1 or y0b <= 1 or x0b + wb >= W - 1 or y0b + hb >= H - 1:
+            print(f"    ⚠ 벽 점이 프레임 가장자리에 걸림({x0b},{y0b},{wb}x{hb}) — 중심이 밀릴 수 있음", flush=True)
+        ys, xs = np.nonzero(lab == i); w = g[ys, xs].astype(float) + 1
+        frag.append([float((xs * w).sum()), float((ys * w).sum()), float(w.sum()), a])
+    frag.sort(key=lambda q: -q[3])
+    groups = []
+    for f in frag:
+        cx, cy = f[0] / f[2], f[1] / f[2]
+        for gr in groups:
+            gx, gy = gr[0] / gr[2], gr[1] / gr[2]
+            if math.hypot(cx - gx, cy - gy) <= merge_px:
+                gr[0] += f[0]; gr[1] += f[1]; gr[2] += f[2]; gr[3] += f[3]; break
+        else:
+            groups.append(list(f))
+    pts = [(gr[0] / gr[2], gr[1] / gr[2], int(gr[3])) for gr in groups if area[0] <= gr[3] <= area[1]]
+    pts.sort(key=lambda q: q[1])
+    return pts
+
+
 def wall_dots_cam1(ref):
     """물고 있는 벽의 색점 2개(손목캠). ref["cam1_wall_detect"] 규칙(색별)."""
     import cv2, numpy as np
     cfg = ref["cam1_wall_detect"]
     b = UR.urlopen("http://127.0.0.1:8766/raw", timeout=5).read()
     img = cv2.imdecode(np.frombuffer(b, np.uint8), cv2.IMREAD_COLOR)
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    m = cv2.inRange(hsv, np.array(cfg["hsv_lo"], np.uint8), np.array(cfg["hsv_hi"], np.uint8))
-    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-    n, lab, stt, cen = cv2.connectedComponentsWithStats(m); pts = []
-    g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    for i in range(1, n):
-        a = int(stt[i, 4]); x, y = cen[i]
-        if not (cfg["area"][0] <= a <= cfg["area"][1]) or x < cfg["x_min"] or x > 1260 or y < 20 or y > 700:
-            continue
-        ys, xs = np.nonzero(lab == i); w = g[ys, xs].astype(float) + 1
-        pts.append((float((xs * w).sum() / w.sum()), float((ys * w).sum() / w.sum()), a))
-    pts.sort(key=lambda q: q[1])
-    return pts
+    return _held_blobs(img, cfg.get("hsv_ranges") or [(cfg["hsv_lo"], cfg["hsv_hi"])], cfg["area"], cfg["x_min"])
 
 
 def grasp_measure(color="blue", rack_dang=None):
@@ -139,14 +166,40 @@ def grasp_measure(color="blue", rack_dang=None):
         dang = HG.wrap_deg(ang - ref["cam1_wall_ang_deg"]); how = "2점"
     else:
         # 1점: 기준 점 자리에 가장 가까운 점 하나로 위치만. 각은 랙 관측 각차(없으면 0).
-        rx, ry = ref["cam1_wall_mid"]
+        # ★9/7 실기(파랑 −16.43mm): 기준이 2점인데 이번에 1점만 잡히면 그 1점을 '두 점의 중점'과 비교해
+        #   간격의 절반(425px×0.09≈19mm)이 통째로 가짜 편차가 됐다 → 기준 '점' 중 가장 가까운 것과 비교한다.
+        rp = ref.get("cam1_wall_pd") or []
+        if len(rp) >= 2:
+            base_pt = min(rp, key=lambda t: math.hypot(pts[0][0] - t[0], pts[0][1] - t[1]))
+            rx, ry = float(base_pt[0]), float(base_pt[1])
+            how_note = "1점(기준 2점 중 가까운 쪽)"
+        else:
+            rx, ry = ref["cam1_wall_mid"]
+            how_note = "1점"
         q = min(pts, key=lambda t: math.hypot(t[0] - rx, t[1] - ry)); mid = (q[0], q[1])
-        dang = rack_dang if rack_dang is not None else 0.0; how = "1점" + ("+랙각" if rack_dang is not None else "")
-    dx = mid[0] - ref["cam1_wall_mid"][0]; dy = mid[1] - ref["cam1_wall_mid"][1]
+        # ★9/7 16:48: 서명은 '위쪽 점'(1027,279), 측정은 '아래쪽 점'(1005,680) 하나만 잡혀
+        #   서로 다른 점을 비교해 두 점 간격 425px 이 그대로 −37.97mm 로 나왔다.
+        #   이런 '점 정체 불일치'는 조용히 숫자로 내지 말고 멈춘다(게이트는 엄격하게).
+        _d = math.hypot(q[0] - rx, q[1] - ry)
+        if _d > DOT_IDENTITY_MAX_PX:
+            return None, (f"든 벽 점이 서명의 점과 {_d:.0f}px 떨어짐(> {DOT_IDENTITY_MAX_PX:.0f}) — "
+                          f"서명 (%.0f,%.0f) vs 측정 (%.0f,%.0f): 다른 점을 본 것. "
+                          f"사이클이 재는 자세(랙 위 들어올림)에서 [좋은 파지 서명 저장] 으로 다시 찍을 것"
+                          % (rx, ry, q[0], q[1]))
+        ref_mid = (rx, ry)
+        dang = rack_dang if rack_dang is not None else 0.0; how = how_note + ("+랙각" if rack_dang is not None else "")
+    if len(pts) >= 2 and n_ref >= 2:
+        ref_mid = tuple(ref["cam1_wall_mid"])
+    dx = mid[0] - ref_mid[0]; dy = mid[1] - ref_mid[1]
     across = ACROSS_SIGN * dx * scale; along = ALONG_SIGN * dy * scale
     grip = HG.GripMeasure(center=(across, along), angle_deg=90.0 + dang, bottom_dz=0.0)
     return grip, {"dx_px": dx, "dy_px": dy, "dang": dang, "across_mm": across, "along_mm": along, "scale": scale, "how": how}
 
+
+# ★9/7 실측: 든 벽 점 면적은 색마다 크게 다르다(노랑 2703 · 파랑 1650 · red_s 617~756).
+#   red_s 는 하한 500 이 경계에 걸려 프레임마다 '벽 점 0개'가 되어 파지 편차를 못 재고 정지했다.
+
+DOT_IDENTITY_MAX_PX = 150.0   # 측정한 벽 점이 서명의 점에서 이보다 멀면 '다른 점' → 편차 계산 금지
 
 GRASP_GATE_MM, GRASP_GATE_DEG = 1.0, 0.3     # 설계 2단계 게이트(9/4 v2.1). 넘으면 정지·보고, 자동 재파지 금지
 HELD_TOP_DEPTH_OFFSET = 273.0   # 든 벽 윗변 뎁스(mm) = SEAT_Z − 273  (아래 유도)
@@ -167,19 +220,26 @@ def wall_scale(color):
 def save_grasp_sig_now(color, grip_cmd, gr):
     """★든 상태에서 지금 손목캠 벽 점을 공칭 파지 서명으로 저장(그리퍼 조작 없음). 축척은 wall_scale(color) 상수."""
     import cv2, numpy as np
-    lo, hi = WALL_DOT_HSV[color]
-    b = UR.urlopen("http://127.0.0.1:8766/raw", timeout=5).read()
-    img = cv2.imdecode(np.frombuffer(b, np.uint8), cv2.IMREAD_COLOR); hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    m = cv2.inRange(hsv, np.array(lo, np.uint8), np.array(hi, np.uint8)); m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-    n, lab, stt, cen = cv2.connectedComponentsWithStats(m); g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY); pts = []
-    for i in range(1, n):
-        a = int(stt[i, 4]); x, y = cen[i]
-        # 9/6 20:2x: x_min 600 이라 랙 쪽 빨간 점(x 659)까지 서명에 섞였다(빨강 각 −55° 오저장) → 든 벽 영역(HELD_BOX x≥820)만.
-        if not (500 <= a <= 6000) or x < 820 or x > 1260 or y < 20 or y > 700:
-            continue
-        ys, xs = np.nonzero(lab == i); w = g[ys, xs].astype(float) + 1
-        pts.append((float((xs * w).sum() / w.sum()), float((ys * w).sum() / w.sum()), a))
-    pts.sort(key=lambda q: q[1])
+    amin = HELD_AREA_MIN.get(color, 500)
+    # 9/6 20:2x: x_min 600 이라 랙 쪽 빨간 점(x 659)까지 서명에 섞였다(빨강 각 −55° 오저장) → 든 벽 영역(HELD_BOX x≥820)만.
+    # 9/7: 측정(wall_dots_cam1)과 같은 조각합치기를 쓰고, ★한 프레임이 아니라 여러 프레임 중앙값으로 찍는다
+    #      (red_s 실측: 같은 파지에서 면적 510~756, 중심 ±3px 로 흔들려 단발 서명이 그 잡음을 기준에 박는다).
+    cand = []
+    for _ in range(7):
+        b = UR.urlopen("http://127.0.0.1:8766/raw", timeout=5).read()
+        img = cv2.imdecode(np.frombuffer(b, np.uint8), cv2.IMREAD_COLOR)
+        q = _held_blobs(img, WALL_DOT_HSV[color], [amin, 6000], HELD_X_MIN.get(color, 820))
+        if q:
+            cand.append(q)
+        time.sleep(0.15)
+    pts = []
+    if cand:
+        import statistics as _s
+        nmode = _s.mode([len(q) for q in cand])
+        sel = [q for q in cand if len(q) == nmode]
+        print(f"  서명 프레임 {len(cand)}/7 검출, 점 {nmode}개 프레임 {len(sel)}개 중앙값 사용")
+        for i in range(nmode):
+            pts.append((_s.median([q[i][0] for q in sel]), _s.median([q[i][1] for q in sel]), int(_s.median([q[i][2] for q in sel]))))
     if not pts:
         print("  ⚠ 서명 저장 실패: 벽 점 0개"); return None
     if len(pts) >= 2:
@@ -188,9 +248,15 @@ def save_grasp_sig_now(color, grip_cmd, gr):
     else:
         ang, L, mid = 0.0, 0.0, [pts[0][0], pts[0][1]]
     ref = json.load(open(GRASP_REF)) if os.path.exists(GRASP_REF) else {}
-    ref.setdefault("by_color", {})[color] = {"made": time.strftime("%Y-%m-%d %H:%M"), "grip_cmd": grip_cmd, "grip_real": gr, "tcp": st()["tcp"],
+    try:
+        import color_lock as _CL
+        _expo = (_CL.current_settings() or {}).get("exposure")
+    except Exception:
+        _expo = None
+    # ★9/7: 같은 파지라도 노출이 다르면 점 중심이 12.8px 밀린다 → 촬영 노출을 반드시 남겨 측정 때 되맞춘다.
+    ref.setdefault("by_color", {})[color] = {"made": time.strftime("%Y-%m-%d %H:%M"), "grip_cmd": grip_cmd, "grip_real": gr, "tcp": st()["tcp"], "expo": _expo,
         "cam1_wall_pd": [[q[0], q[1], q[2]] for q in pts], "cam1_wall_ang_deg": ang, "cam1_wall_gap_px": L, "cam1_wall_mid": mid,
-        "cam1_wall_detect": {"hsv_lo": list(lo), "hsv_hi": list(hi), "area": [500, 6000], "x_min": 600},
+        "cam1_wall_detect": {"hsv_ranges": [[list(a), list(b)] for a, b in (WALL_DOT_HSV[color] if isinstance(WALL_DOT_HSV[color], list) else [WALL_DOT_HSV[color]])], "area": [amin, 6000], "x_min": HELD_X_MIN.get(color, 820)},
         "note": "랙 중앙 파지(rack_calib) 상태에서 --grasp-teach 로 저장"}
     json.dump(ref, open(GRASP_REF, "w"), ensure_ascii=False, indent=1)
     print(f"  ✅ [{color}] 파지 서명 저장({len(pts)}점): 각 {ang:+.2f}° 간격 {L:.0f}px 중점 ({mid[0]:.0f},{mid[1]:.0f})")
@@ -300,9 +366,30 @@ WALL_DOT_HSV = {                       # 물고 있는 벽의 점 색(손목캠,
     "yellow": ((15, 80, 110), (38, 255, 255)),
     # 9/6 20:2x 실측(빨강 긴 벽 든 손목캠): 빨강 점 H 가 175 를 넘어가 조각남(306+240px) → 상한 179 로 하나(2424px).
     #   0~8 구간까지 더해도 차이 없어 단일 범위 유지(place_calc 6곳이 lo,hi 튜플을 그대로 씀).
-    "red":    ((135, 90, 55), (179, 255, 255)),
-    "red_s":  ((135, 90, 55), (179, 255, 255)),
+    # ★9/7 18:0x 사용자 지시로 색 실측(랙 캡쳐에서 점 화소 직접 측정):
+    #   빨강 벽 점의 실제 색상은 H 3 / 10 / 17 로 **0쪽**이다. 범위가 135~179 하나뿐이라 점 가장자리
+    #   몇 화소만 걸려 9+29+9 조각으로 갈라졌고(맨 위 점), 면적 하한 40 을 못 넘어 사라졌다.
+    #   빨강은 색상환에서 0과 179 양쪽에 걸치므로 두 구간을 모두 본다. 노랑(H15~)과 겹치지 않게 상한 12.
+    "red":    [((135, 90, 55), (179, 255, 255)), ((0, 90, 55), (12, 255, 255))],
+    "red_s":  [((135, 90, 55), (179, 255, 255)), ((0, 90, 55), (12, 255, 255))],
+    "red_in": [((135, 90, 55), (179, 255, 255)), ((0, 90, 55), (12, 255, 255))],
 }
+
+
+def _mask_ranges(img, ranges):
+    """HSV 구간(튜플 하나 또는 리스트)의 합집합 마스크. 빨강은 색상환 0쪽과 179쪽이 둘 다 필요하다."""
+    import cv2, numpy as np
+    rs = ranges if isinstance(ranges, list) else [ranges]
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    m = None
+    for lo, hi in rs:
+        mm = cv2.inRange(hsv, np.array(lo, np.uint8), np.array(hi, np.uint8))
+        m = mm if m is None else cv2.bitwise_or(m, mm)
+    return cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+
+
+def wall_mask(img, color):
+    return _mask_ranges(img, WALL_DOT_HSV[color])
 
 
 def pick_pose(color):
@@ -323,10 +410,9 @@ def capture_grasp_sig(color, grip_cmd):
     tcp0 = st()["tcp"]
     gr = gripper(grip_cmd); print(f"  그리퍼 닫기 {grip_cmd} → 실측 {gr}")
     time.sleep(0.4)
-    lo, hi = WALL_DOT_HSV[color]
     b = UR.urlopen("http://127.0.0.1:8766/raw", timeout=5).read()
-    img = cv2.imdecode(np.frombuffer(b, np.uint8), cv2.IMREAD_COLOR); hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    m = cv2.inRange(hsv, np.array(lo, np.uint8), np.array(hi, np.uint8)); m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    img = cv2.imdecode(np.frombuffer(b, np.uint8), cv2.IMREAD_COLOR)
+    m = wall_mask(img, color)
     n, lab, stt, cen = cv2.connectedComponentsWithStats(m); g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY); pts = []
     for i in range(1, n):
         a = int(stt[i, 4]); x, y = cen[i]
@@ -625,7 +711,13 @@ def run(color, seat=False, do_pick=True, target=None, align=True, len_gate=False
         s_ = st(); print("현재 tcp", [round(v, 1) for v in s_["tcp"]], "grip", s_.get("gripper"), "frozen", s_.get("frozen"))
 
 
-HELD_AREA_MIN = {"blue": 500, "yellow": 500, "red": 400, "red_s": 250}   # red_s 점이 작음(z478 실측 467, 옛 하한 500 에 걸려 0개)
+# ★단일 출처(9/7 17:0x: 같은 이름이 두 군데 있어 앞엣것이 무시되던 것을 정리).
+#   파랑 200 — 랙 위 z465 에서 위쪽 점은 expo167 에 면적 273 이라 하한 500 에 걸려 버려졌고,
+#   그 탓에 늘 '화면 바닥에 잘린 아래쪽 점'만 남아 중심이 흔들렸다.
+HELD_AREA_MIN = {"blue": 200, "yellow": 500, "red": 400, "red_s": 250, "red_in": 250}
+# ★9/7 20:0x: 내벽(red_in)은 다른 벽보다 짧아 물렸을 때 점이 x≈785 에 맺힌다 —
+#   든 벽 영역 x≥820 에 걸려 "벽 점 0개"가 됐다. 색별로 좌측 한계를 둔다(랙 쪽 점과는 여전히 멀다).
+HELD_X_MIN = {"red_in": 740}
 HELD_NEAR_PX = 90.0
 
 
@@ -654,16 +746,13 @@ def held_wall_dots(color):
       하강 중 기둥 px 이동을 '막힘'으로 오판한다. 파지 서명(grasp_ref)의 점 자리 ±HELD_NEAR_PX 안의 점을 우선 고르고,
       서명이 없을 때만 면적 순(그때도 x≥600·면적 하한은 색별)."""
     import cv2, numpy as np
-    lo, hi = WALL_DOT_HSV[color]
     b = UR.urlopen("http://127.0.0.1:8766/raw", timeout=5).read()
-    img = cv2.imdecode(np.frombuffer(b, np.uint8), cv2.IMREAD_COLOR); hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    m = cv2.inRange(hsv, np.array(lo, np.uint8), np.array(hi, np.uint8)); m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-    n, lab, stt, cen = cv2.connectedComponentsWithStats(m); pts = []
+    img = cv2.imdecode(np.frombuffer(b, np.uint8), cv2.IMREAD_COLOR)
+    m = wall_mask(img, color)
+    # ★9/7 17:12: 이 함수만 y 상한 700 을 쓰고 서명 쪽(_held_blobs)은 715 라, 새 파랑 서명 점(y 701.3)이
+    #   1.3px 차이로 여기서만 배제돼 "막힘 감시용 벽 점 없음 — 하강 금지" 가 났다. 검출 경로를 하나로 합친다.
     amin = HELD_AREA_MIN.get(color, 400)
-    for i in range(1, n):
-        a = int(stt[i, 4]); x, y = cen[i]
-        if amin <= a <= 6000 and 600 <= x <= 1260 and 20 <= y <= 700:
-            pts.append((float(x), float(y), a))
+    pts = _held_blobs(img, WALL_DOT_HSV[color], [amin, 6000], min(600, HELD_X_MIN.get(color, 820)))
     ref = load_grasp_ref(color)
     anchors = [(q[0], q[1]) for q in (ref or {}).get("cam1_wall_pd") or []]
     if anchors:
@@ -678,9 +767,24 @@ def held_wall_dots(color):
 
 
 JAM_PX = 6.0        # (구) 누적 임계. 13:41 실기: 채널 마찰로 3mm 마다 0.6~0.9px 씩 서서히 밀려 z+9 에서 누적 6.5px → 오판 정지(9/2 성공 삽입도 접촉 6~8px 이었음)
-JAM_STEP_PX = 5.0   # ★한 단계(3mm) 안에서 이만큼 튀면 막힘(마찰 밀림 0.6~0.9px/단계, 진짜 막힘 ≈33px/단계). 사용자 "벽 부러뜨리지 말 것" → 8→5
-JAM_TOTAL_PX = 15.0 # 누적 이만큼(≈1.4mm) 이면 죠에서 빠지는 중 → 막힘(20→15)
-JAM_STEP = 3.0      # 채널 안 하강 단위(mm)
+# ★9/7 15:19 오판: z+76 에서 단계 +5.1px 로 정지. 같은 날 성공한 하강(14:46)의 단계 잡음 최대가 4.7px 이라
+#   임계 5.0 은 잡음 바닥에 붙어 있었다. 진짜 막힘은 단계당 ≈33px, 마찰 밀림은 0.6~0.9px 로 사이가 넓다.
+#   → 단계 임계를 8.0 으로 올리고(진짜 막힘의 1/4), 누적 15px(≈1.4mm) guard 는 그대로 두어 안전을 유지한다.
+JAM_STEP_PX = 5.0   # 한 단계(3mm) 안에서 이만큼 튀면 막힘 (9/7 사용자 지시로 8.0 → 5.0 원복: 게이트는 엄격하게, 대신 재확인을 3프레임 중앙값으로 보강)
+# ★9/7 사용자 지적("왜 355까지 안 들어가?"): 벽은 3mm 내려갈 때마다 마찰로 ≈1px 씩 꾸준히 밀린다.
+#   하강을 z+98 에서 시작하면 33단계 동안 33px 이 쌓여 **누적 15px 은 바닥 전에 반드시 넘는다**.
+#   그 지점이 옛 성공창(바닥 8mm)에 걸리면 z+7 을 '안착'이라 부르고 멈춰 벽이 7mm 덜 들어갔다.
+#   → 누적을 하강 전체가 아니라 **최근 JAM_WIN_STEPS 단계 창**으로 본다(마찰 5px vs 진짜 이탈 15px+).
+JAM_TOTAL_PX = 15.0 # 창 안에서 이만큼(≈1.4mm) 밀리면 죠에서 빠지는 중 → 막힘
+JAM_WIN_STEPS = 5   # 누적을 보는 창(단계 수) — 15mm 구간
+SEAT_TOUCH_MM = 3.0 # 안착 z 로부터 이 안에서의 밀림만 '바닥 접촉(성공)' 으로 본다(8.0 → 3.0 으로 조임)
+# ★9/7 사용자 지시: "처음 3mm 씩 6번, 그다음 10mm 씩" — 위험 구간은 벽 밑동이 기둥 사이로 들어가는
+#   진입부(기둥 86mm → 하강 시작 z+100 부터 여섯 걸음이 그 구간)다. 채널에 들어가면 기둥이 잡아 준다.
+#   단, 바닥 근처는 '안착 접촉'을 3mm 안에서 잡아야 벽을 누르지 않으므로 다시 잘게 간다.
+JAM_STEP = 3.0          # 진입부·바닥부 하강 단위(mm)
+JAM_STEP_FAST = 10.0    # 채널 안(중간 구간) 하강 단위(mm)
+JAM_FINE_HEAD = 6       # 처음 이 횟수만큼은 JAM_STEP
+JAM_FINE_TAIL_MM = 15.0 # 안착 z 로부터 이 높이 아래는 다시 JAM_STEP
 
 
 def descend_monitored(color, x, y, rot, zs, g_close):
@@ -705,9 +809,18 @@ def descend_monitored(color, x, y, rot, zs, g_close):
     ref_c = (sum(p[0] for p in ref) / len(ref), sum(p[1] for p in ref) / len(ref))
     print(f"  감시 기준 벽 점 {[(round(p[0]),round(p[1])) for p in ref]}")
     d_prev = 0.0
+    d_hist = [0.0]                      # 창 누적용 이력
     z0 = st()["tcp"][2]
     # 15:35·15:57 실기: 두 막힘 모두 'z440→z_seat+60 첫 25mm 무감시 이동' 에서 발생(채널 입구) → 지금 높이에서 바로 JAM_STEP 씩 감시하며 내려간다.
-    z = max(zs, z0 - JAM_STEP)
+    def _step_mm(z_now, n_done):
+        # 9/7 사용자 지시: 기둥 진입 안전장치는 예전 그대로 — 처음 JAM_FINE_HEAD 단계는 3mm,
+        #   바닥 근처도 3mm, 그 사이 채널 안에서만 10mm. (높이 기준 진입 밴드는 사용자 요청으로 철회)
+        if n_done < JAM_FINE_HEAD or (z_now - zs) <= JAM_FINE_TAIL_MM + JAM_STEP_FAST:
+            return JAM_STEP
+        return JAM_STEP_FAST
+
+    n_step = 0
+    z = max(zs, z0 - _step_mm(z0, n_step))
     speed(1)
     try:
         while True:
@@ -732,25 +845,33 @@ def descend_monitored(color, x, y, rot, zs, g_close):
                 d = max(ds)
                 print(f"    그리퍼 {g} · 벽 점 이동 {d:.1f}px" + (f" (매칭 {len(ds)}/{len(ref)})" if len(ds) != len(ref) else ""), flush=True)
                 step = d - d_prev
+                d_win = d - d_hist[max(0, len(d_hist) - JAM_WIN_STEPS)]   # 최근 창 안에서의 밀림
                 # 9/7 오판: z+76(채널 밖)에서 0.4→7.8px 로 한 프레임만 튀어 정지. 검출 잡음 한 번에 멈추지 않게 재확인한다.
-                if step > JAM_STEP_PX or d > JAM_TOTAL_PX:
-                    time.sleep(0.35)
-                    cur2 = held_wall_dots(color)
-                    if cur2:
+                if step > JAM_STEP_PX or d_win > JAM_TOTAL_PX:
+                    # 재확인은 1프레임이 아니라 3프레임 중앙값으로 — 검출 잡음 한 번에 멈추지 않게.
+                    d2s = []
+                    for _ in range(3):
+                        time.sleep(0.25)
+                        cur2 = held_wall_dots(color)
+                        if not cur2:
+                            continue
                         c2 = (sum(p[0] for p in cur2) / len(cur2), sum(p[1] for p in cur2) / len(cur2))
-                        ds2 = [math.hypot(c2[0] - r0[0], c2[1] - r0[1]) for r0 in [min(ref, key=lambda r: math.hypot(c2[0] - r[0], c2[1] - r[1]))]]
-                        d2 = max(ds2)
-                        if d2 - d_prev <= JAM_STEP_PX and d2 <= JAM_TOTAL_PX:
-                            print(f"    (재확인: {d:.1f}px → {d2:.1f}px — 잡음으로 보고 진행)", flush=True)
-                            d = d2; step = d - d_prev
-                d_prev = d
-                if step > JAM_STEP_PX or d > JAM_TOTAL_PX:
+                        r0 = min(ref, key=lambda r: math.hypot(c2[0] - r[0], c2[1] - r[1]))
+                        d2s.append(math.hypot(c2[0] - r0[0], c2[1] - r0[1]))
+                    if d2s:
+                        import statistics as _s
+                        d2 = _s.median(d2s)
+                        if d2 - d_prev <= JAM_STEP_PX and (d2 - d_hist[max(0, len(d_hist) - JAM_WIN_STEPS)]) <= JAM_TOTAL_PX:
+                            print(f"    (재확인 3프레임 중앙값: {d:.1f}px → {d2:.1f}px — 잡음으로 보고 진행)", flush=True)
+                            d = d2; step = d - d_prev; d_win = d - d_hist[max(0, len(d_hist) - JAM_WIN_STEPS)]
+                d_prev = d; d_hist.append(d)
+                if step > JAM_STEP_PX or d_win > JAM_TOTAL_PX:
                     # ★9/5 실증: 채널 끝까지 내려간 뒤 마지막 1mm 에서 7.5px 밀림 = 밑동이 밑판에 닿은 '안착 접촉'.
                     #   바닥 근처(z_seat+8 이내)의 밀림은 막힘이 아니라 성공 신호 → 멈추고 성공 처리(더 누르지 않음).
-                    if z <= zs + 8.0:
+                    if z <= zs + SEAT_TOUCH_MM:
                         print(f"  ★안착 접촉: 바닥 근처에서 벽 밀림 {d:.1f}px(단계 {step:+.1f}) → 정지(성공)", flush=True)
                         return
-                    raise RuntimeError(f"막힘: 벽이 죠 안에서 단계 {step:+.1f}px / 누적 {d:.1f}px(≈{d*0.09:.1f}mm) 밀림 (z+{z - zs:.0f})")
+                    raise RuntimeError(f"막힘: 벽이 죠 안에서 단계 {step:+.1f}px / 최근{JAM_WIN_STEPS}단계 {d_win:.1f}px(≈{d_win*0.09:.1f}mm) 밀림, 전체 누적 {d:.1f}px (z+{z - zs:.0f})")
                 elif d > JAM_PX:
                     print(f"    (마찰 밀림 누적 {d:.1f}px, 단계 {step:+.1f}px — 진행)", flush=True)
             else:
@@ -758,7 +879,8 @@ def descend_monitored(color, x, y, rot, zs, g_close):
                 raise RuntimeError("막힘 감시 불가(벽 점 소실)")
             if z <= zs + 0.01:
                 break
-            z = max(zs, z - JAM_STEP)
+            n_step += 1
+            z = max(zs, z - _step_mm(z, n_step))
         print(f"  ★안착 z 도달, 그리퍼 {grip_read()}")
     except Exception as e:
         post("stop", {"dry_run": False}); time.sleep(0.5)
@@ -800,12 +922,11 @@ GAIN_LADDER = (16, 64)                        # 노출 사다리로 안 되면 g
 def rack_dots(color, n=4):
     """랙 픽 호버(z467)에서 벽의 색점(카메라 정면 아래). n 프레임 평균, 면적 큰 2개."""
     import cv2, numpy as np
-    lo, hi = WALL_DOT_HSV[color]
     acc = []
     for _ in range(n):
         b = UR.urlopen("http://127.0.0.1:8766/raw", timeout=5).read()
-        img = cv2.imdecode(np.frombuffer(b, np.uint8), cv2.IMREAD_COLOR); hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-        m = cv2.inRange(hsv, np.array(lo, np.uint8), np.array(hi, np.uint8)); m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        img = cv2.imdecode(np.frombuffer(b, np.uint8), cv2.IMREAD_COLOR)
+        m = wall_mask(img, color)
         nn, lab, stt, cen = cv2.connectedComponentsWithStats(m); pts = []
         for i in range(1, nn):
             a = int(stt[i, 4]); x, y = cen[i]
@@ -837,21 +958,50 @@ def _cluster_walls(pts, min_dots=2, x_gap=60.0):
     return [g for g in groups if len(g) >= min_dots]
 
 
+# ★9/7 사용자 확정: 파지 위치는 '양 끝점의 중점'이 아니라 **가운데 점**이다.
+#   파랑 = 점 5개 중 3번째 점, 나머지(노랑·빨강·red_s) = 점 4개 중 가운데(2·3번 점의 중점).
+#   9/6 실측으로 점 간격이 38.8/53.5/63.1/29.7mm 로 균등하지 않음이 이미 확인됐다 → 끝점 중점은 5mm 치우친다.
+#   이 정의를 쓰면 벽이 랙에서 움직여도 파지점이 벽을 그대로 따라간다(사용자 목표).
+#   9/7 16:1x 랙 관측 실측(노출 333·500 동일): blue 5점 · yellow 3점 · red 2점 · red_s 2점.
+#   빨강 계열은 가운데 스티커가 검출되지 않는다 → 가운데 점을 강제하면 전 프레임이 버려진다.
+#   따라서 '기대 개수가 잡히면 가운데 점, 아니면 끝점 중점' 으로 물러난다(로그로 어느 쪽을 썼는지 남긴다).
+WALL_DOT_N = {"blue": 5, "yellow": 3, "red": 3, "red_s": 3, "red_in": 3}   # 9/7 18:1x 색 범위 수정 후 빨강 계열도 3점이 안정적으로 잡힘
+RACK_FRAG_MERGE_PX = 18.0                  # 랙 색점 조각 합치기 반경(빨강 맨 위 점이 9+29+9 세 조각으로 갈라짐)
+X_WIN_PX = 45.0                            # x_hint 기준 이 안의 점만 그 벽의 것으로 본다(실측 벽 하나의 x 폭 6~10px)
+
+
+def _grip_point(dots, p1, p2):
+    """벽 축을 따라 정렬한 뒤 가운데 점(홀수) 또는 가운데 두 점의 중점(짝수)."""
+    ax = (p2[0] - p1[0], p2[1] - p1[1])
+    L = math.hypot(*ax) or 1.0
+    ax = (ax[0] / L, ax[1] / L)
+    srt = sorted(dots, key=lambda q: (q[0] - p1[0]) * ax[0] + (q[1] - p1[1]) * ax[1])
+    k = len(srt)
+    if k % 2 == 1:
+        return (srt[k // 2][0], srt[k // 2][1])
+    a, b = srt[k // 2 - 1], srt[k // 2]
+    return ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0)
+
+
 def rack_ends(color, n=4, x_hint=None):
     """★랙 관측자세에서 벽의 색점 → 양 끝점 중앙. 같은 색 벽이 여럿(red_s/red)이면 x_hint 로 고른다.
     x_hint 없으면 점이 가장 많은(가장 뚜렷한) 벽 클러스터. 고립 유령점은 클러스터에서 배제."""
     import cv2, numpy as np, math as _m
-    lo, hi = WALL_DOT_HSV[color]
     acc = []
     for _ in range(n):
         b = UR.urlopen("http://127.0.0.1:8766/raw", timeout=5).read()
-        img = cv2.imdecode(np.frombuffer(b, np.uint8), cv2.IMREAD_COLOR); hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-        m = cv2.inRange(hsv, np.array(lo, np.uint8), np.array(hi, np.uint8)); m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        img = cv2.imdecode(np.frombuffer(b, np.uint8), cv2.IMREAD_COLOR)
+        m = wall_mask(img, color)
         nn, lab, stt, cen = cv2.connectedComponentsWithStats(m); pts = []
         for i in range(1, nn):
             a = int(stt[i, 4]); x, y = cen[i]
             if 40 < a < 3000 and 20 < x < 1260 and 20 < y < 700:
                 pts.append((float(x), float(y)))
+        # ★9/7: 빨강 긴 벽(x≈852)과 red_s(x≈763)는 같은 색이고 90px 밖에 안 떨어져 있어,
+        #   x-간격 60px 체이닝으로 한 클러스터가 되곤 한다(실측: red_s 가 x808 에서 3점·길이 −10%).
+        #   벽 하나의 점들은 x 로 6~10px 안에 모이므로, x_hint 가 있으면 ±X_WIN 밖은 먼저 버린다.
+        if x_hint is not None:
+            pts = [q for q in pts if abs(q[0] - x_hint) <= X_WIN_PX]
         walls = _cluster_walls(pts)
         if not walls:
             continue
@@ -861,17 +1011,38 @@ def rack_ends(color, n=4, x_hint=None):
             walls.sort(key=lambda g: -len(g))          # 점 가장 많은 벽
         g = walls[0]
         e = max(((_m.dist(g[i], g[j]), i, j) for i in range(len(g)) for j in range(i + 1, len(g))))
-        acc.append((g[e[1]], g[e[2]], len(g)))
+        want = WALL_DOT_N.get(color)
+        p1_, p2_ = g[e[1]], g[e[2]]
+        if want and len(g) == want:
+            gp = _grip_point(g, p1_, p2_); mode = "mid_dot"
+        else:
+            gp = ((p1_[0] + p2_[0]) / 2.0, (p1_[1] + p2_[1]) / 2.0); mode = "ends_mid"
+        acc.append((p1_, p2_, len(g), gp, mode))
         time.sleep(0.1)
     if len(acc) < max(1, (n + 1) // 2):
         return None
     import statistics as st_
+    # ★9/7 실측(red_s): 4프레임 중 1프레임에서 끝점 하나가 사라져 span 362→318px 이 되는데,
+    #   그대로 평균 내면 길이 −3%(게이트 통과) + 중앙 1.8mm 이동이라는 '조용한 오차'가 된다.
+    #   → 프레임 길이의 중앙값에서 4% 넘게 벗어난 프레임은 끝점 소실로 보고 버린다.
+    if len(acc) >= 3:
+        Ls = [math.hypot(a[1][0] - a[0][0], a[1][1] - a[0][1]) for a in acc]
+        med = st_.median(Ls)
+        keep = [a for a, L in zip(acc, Ls) if med <= 0 or abs(L - med) <= 0.04 * med]
+        if len(keep) >= max(1, (n + 1) // 2):
+            acc = keep
     mids = [((a[0][0] + a[1][0]) / 2, (a[0][1] + a[1][1]) / 2) for a in acc]
     L = [math.hypot(a[1][0] - a[0][0], a[1][1] - a[0][1]) for a in acc]
     ang = [math.degrees(math.atan2(a[1][0] - a[0][0], a[1][1] - a[0][1])) for a in acc]
     p1 = (st_.mean(a[0][0] for a in acc), st_.mean(a[0][1] for a in acc))
     p2 = (st_.mean(a[1][0] for a in acc), st_.mean(a[1][1] for a in acc))
-    return {"mid": (st_.mean(m[0] for m in mids), st_.mean(m[1] for m in mids)),
+    grip = (st_.median([a[3][0] for a in acc]), st_.median([a[3][1] for a in acc]))
+    modes = [a[4] for a in acc]
+    mode = "mid_dot" if modes.count("mid_dot") > len(modes) / 2 else "ends_mid"
+    if mode == "ends_mid":                                # 가운데 점을 못 써서 물러난 경우만 알린다
+        grip = (st_.mean(m[0] for m in mids), st_.mean(m[1] for m in mids))
+    return {"mid": grip, "grip_mode": mode,               # ★파지 기준 = 가운데 점(없으면 끝점 중점)
+            "ends_mid": (st_.mean(m[0] for m in mids), st_.mean(m[1] for m in mids)),
             "len_px": st_.mean(L), "ang": st_.mean(ang), "n_dots": acc[-1][2], "p1": p1, "p2": p2}
 
 
@@ -968,10 +1139,9 @@ def rack_grip_xy(color, dxy=(0.0, 0.0)):
 def _rack_color_center(color, x_hint, radius=220.0):
     """탐색용: 그 색 점 중 x_hint 근처(±radius) 것들의 중심 px. (양끝이 안 보여도 보이는 점으로 방향을 잡는다)"""
     import cv2
-    lo, hi = WALL_DOT_HSV[color]
     b = UR.urlopen("http://127.0.0.1:8766/raw", timeout=5).read()
-    img = cv2.imdecode(np.frombuffer(b, np.uint8), cv2.IMREAD_COLOR); hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    m = cv2.inRange(hsv, np.array(lo, np.uint8), np.array(hi, np.uint8)); m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    img = cv2.imdecode(np.frombuffer(b, np.uint8), cv2.IMREAD_COLOR)
+    m = wall_mask(img, color)
     n, lab, stt, cen = cv2.connectedComponentsWithStats(m)
     pts = [(float(cen[i][0]), float(cen[i][1])) for i in range(1, n) if 40 < stt[i, 4] < 3000 and abs(cen[i][0] - x_hint) <= radius]
     if not pts:
