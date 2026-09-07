@@ -1225,8 +1225,21 @@ def snapshot():
 
 
 PAGE = r"""<!doctype html><meta charset=utf-8><title>HOUSE CYCLE</title>
+<meta name=viewport content="width=device-width,initial-scale=1">
 <style>body{font:14px system-ui;margin:12px;background:#111;color:#eee}button{margin:2px;padding:6px 10px;font-size:14px}
 .big{font-size:18px;padding:10px 16px}.st{font-size:22px;margin:6px 0}.ok{color:#5f5}.no{color:#f66}.wait{color:#fc3}
+/* ★9/7 밤: 노트북·휴대폰에서 조작하려고 좁은 화면 대응 추가(표시만 바뀜, 동작 로직은 그대로).
+   손가락으로 누르는 화면이라 버튼을 키우고, 로그·표는 가로로 넘치지 않게 각자 스크롤시킨다. */
+@media (max-width:820px){
+  body{margin:8px;font-size:16px}
+  button{font-size:17px;padding:11px 14px;margin:3px 2px}
+  .big{font-size:19px;padding:14px 18px;width:100%;box-sizing:border-box}
+  .st{font-size:20px}
+  select,input{font-size:17px;padding:8px}
+  pre{height:180px;font-size:12px}
+  table{display:block;overflow-x:auto;white-space:nowrap;max-width:100%}
+  img{max-width:100%;height:auto}
+}
 pre{background:#000;padding:8px;height:260px;overflow:auto;font-size:12px}table{border-collapse:collapse}td,th{border:1px solid #444;padding:2px 8px}
 .card{display:inline-block;vertical-align:top;background:#1c1c1c;padding:8px;margin:4px;border-radius:6px;min-width:260px}</style>
 <h2>HOUSE CYCLE <small id=tcp></small></h2>
