@@ -82,7 +82,7 @@ RZ_MEASURE_WARN = 0.6                            # 정렬 중 손목캠이 재�
 ALIGN_ROLES = {"blue":   {"newcam": "xy", "wrist": "measure"},   # ★rz 고정 모드: rz 담당 없음 → 정렬은 XY 만, rz 는 운반의 절대 명령값 그대로
                "yellow": {"wrist": "xy"},                        # 9/6 19:28 실측: 노랑 자리(rz90)에선 새카메라가 든 벽을 전혀 못 봄 → 손목캠 단독 XY. rz 담당 없음 = rz 고정
                "red":    {"newcam": "xy"},                       # 9/6 20:37 실측: 빨강 자리에선 손목캠이 기둥 1개만 봄(기준 생성 불가), 새카메라는 벽점1+기둥4 → 새카메라 단독 XY(rz 고정)
-               "red_s":  {"newcam": "xy", "wrist": "measure"}}
+               "red_s":  {"wrist": "xy"}}                        # 9/7 11:00 실측: red_s 자리에서 손목캠이 기둥 4개(파랑3·노랑1)+든 벽 점을 안정적으로 봄. 새카메라는 벽이 화면 위끝, 측면캠 0개. (9/6 설계 메모의 "손목캠 못 봄"은 반증됨)
 # 정렬 수렴 후 사용자 조그 4회(14:33·14:51·15:31·15:57): dx −0.89/−0.04/−1.00/−0.99, dy −2.18/−1.02/−2.03/−2.50, drz +0.32/+0.88/+0.93/+0.65
 #   → 부호가 전부 같고 크기도 비슷 → 사용자 지시("일률적이면 보정값") 대로 정렬 뒤 고정 보정(로봇 프레임, rz≈180 기준). nudge_log 로 잔차 계속 감시.
 POST_ALIGN_OFFSET = {"blue": (0.0, 0.0, 0.0)}   # 15:57 사용자 조그 자리(=이 보정값 자리)에서 채널 입구 막힘 → 보정 보류(0). 카메라 자리로 하강 시험 후 결정   # 15:35 재기준(사용자 자리·이 파지) 후 손목캠 rz 담당. 조그 3회 모두 손목캠 rz 방향 일치(+1.09/+0.99/+1.26 vs 사용자 +0.32/+0.88/+0.93)
@@ -606,16 +606,26 @@ def promote_seat_ref(color):
     try:
         f = os.path.join(STATE, "pose_refs", f"{color}.json")
         pr = jload(f) or {}
-        img = HA.grab("newcam")
-        dots = {c: [[float(q[0]), float(q[1]), float(q[2])] for q in HA._blobs(img, c, 20, "newcam")
-                    if 60 <= q[0] <= 1220 and 60 <= q[1] <= 660] for c in ("blue", "yellow", "red")}   # 가장자리 점은 잘려 중심이 튐 → 저장 단계에서 제외
+        # 9/7: 노랑·red_s 는 안착 자세에서 새카메라가 기둥을 못 본다 → 그 색의 정렬 카메라를 쓰고, 비면 다른 쪽으로.
+        wall_c = "red" if color == "red_s" else color
+        order = list(ALIGN_ROLES.get(color) or ("newcam", "wrist"))
+        order += [x for x in ("newcam", "wrist") if x not in order]
+        src, dots = None, None
+        for cand in order:
+            img = HA.grab(cand)
+            d = {c: [[float(q[0]), float(q[1]), float(q[2])] for q in HA._blobs(img, c, 20, cand)
+                     if 60 <= q[0] <= 1220 and 60 <= q[1] <= 660] for c in ("blue", "yellow", "red")}
+            if sum(len(v) for c, v in d.items() if c != wall_c) >= 2:      # 벽 색 말고 기둥 점 2개 이상
+                src, dots = cand, d; break
+        if not dots:
+            log("  ⚠ 안착 기준 촬영 실패: 어느 카메라에도 기둥 점 2개 이상이 없음"); return False   # 가장자리 점은 잘려 중심이 튐 → 저장 단계에서 제외
         seat = pr.setdefault("seat", {}); cams = seat.setdefault("cams", {})
-        prev = cams.get("newcam")
+        prev = cams.get(src)
         hist = ([{k: v for k, v in prev.items() if k != "history"}] + list((prev or {}).get("history") or []))[:3] if prev else []
-        cams["newcam"] = {"dots": dots, "made": time.strftime("%Y-%m-%d %H:%M"), "note": "안착 성공 사이클에서 자동 승격", "history": hist}
+        cams[src] = {"dots": dots, "made": time.strftime("%Y-%m-%d %H:%M"), "note": "안착 성공 사이클에서 자동 승격", "history": hist}
         seat["tcp"] = PC.st()["tcp"]
         jsave(f, pr)
-        log(f"  ✅ 안착 기준 승격(newcam): " + " ".join(f"{c}{[(round(x), round(y)) for x, y, a in lst]}" for c, lst in dots.items() if lst))
+        log(f"  ✅ 안착 기준 승격({src}): " + " ".join(f"{c}{[(round(x), round(y)) for x, y, a in lst]}" for c, lst in dots.items() if lst))
     except Exception as ex:
         log(f"  ⚠ 안착 기준 승격 실패: {ex}")
 
@@ -779,7 +789,11 @@ def run_held(color):
     rr = (jload(F["rack"]) or {}).get(color) or {}
     g = PC.grip_read()
     if g.isdigit() and int(g) <= rr.get("grip_close", 13):
-        raise Gate(f"그리퍼 {g} ≤ 닫힘값 — 벽을 물고 있지 않음")
+        # 9/7: red_s 는 얇아 물어도 그리퍼 값이 닫힘값 그대로(8→8) — 손목캠 든 벽 점으로 확인(descend_monitored 와 같은 규칙)
+        w = PC.held_wall_dots_expo(color)
+        if not w:
+            raise Gate(f"그리퍼 {g} ≤ 닫힘값 + 손목캠 든 벽 점 0 — 벽을 물고 있지 않음")
+        log(f"  (그리퍼 {g} = 닫힘값이지만 손목캠 든 벽 점 {len(w)}개 → 물고 있음)")
     with LOCK: S["base"] = B; S["grasp"] = G
     log(f"══ 든 채로 3단계부터 [{color}]: 베이스 {B['made']} 파지 편차 가로 {G['across_mm']:+.2f} 길이 {G['along_mm']:+.2f} 각 {G['dang']:+.2f}°")
     T = slot_target(color, B, G)
@@ -798,7 +812,10 @@ def align_here(color):
         raise Gate(f"지금 z{cur[2]:.0f} — z{zh:.0f}±12 에서만(든 채)")
     g = PC.grip_read(); rr = (jload(F["rack"]) or {}).get(color) or {}
     if g.isdigit() and int(g) <= rr.get("grip_close", 13):
-        raise Gate(f"그리퍼 {g} ≤ 닫힘값 — 벽을 물고 있지 않음")
+        # 9/7: red_s 는 얇아 물어도 그리퍼 값이 닫힘값 그대로(8→8) — 손목캠 든 벽 점으로 확인
+        if not PC.held_wall_dots_expo(color):
+            raise Gate(f"그리퍼 {g} ≤ 닫힘값 + 손목캠 든 벽 점 0 — 벽을 물고 있지 않음")
+        log(f"  (그리퍼 {g} = 닫힘값이지만 손목캠 든 벽 점 있음 → 물고 있음)")
     with LOCK:
         S.update(color=color, err=None, align=None, seat=None)
         if not S.get("target"):
@@ -890,7 +907,7 @@ def teach_slot_both(color):
     g = PC.grip_read()
     if g.isdigit() and int(g) <= gc:
         raise Gate(f"슬롯 기준 1/2 거부: 그리퍼 {g} ≤ 닫힘값 {gc} — 벽을 물고 있지 않음(빈손)")
-    if not PC.held_wall_dots(color):
+    if not PC.held_wall_dots_expo(color):
         raise Gate(f"슬롯 기준 1/2 거부: 손목캠에 든 {color} 벽 점 0 — 벽을 물고 있어야 함(빈손)")
     teach_slot_tcp(color)
     wait_user(f"[{color}] 1/2 저장됨 — 그리퍼를 열어 벽을 놓고 벽에서 빼낸 뒤 [▶계속] (로봇이 관측자세로 올라가 2/2 측정)")
@@ -902,6 +919,12 @@ def teach_slot_both(color):
 
 
 def teach_rack_offset(color):
+    # 9/7 사고: 들어올린 뒤(z467) 눌러 z_pick 이 467 로 저장됨 → 픽 높이 근처에서만 허용.
+    rr0 = (jload(F["rack"]) or {}).get(color) or {}
+    zp0 = rr0.get("z_pick")
+    _z = PC.st()["tcp"][2]
+    if zp0 and abs(_z - float(zp0)) > 25.0:
+        raise Gate(f"랙 보정 저장 거부: 지금 z{_z:.0f} 가 파지 높이 z{float(zp0):.0f} 에서 25mm 넘게 벗어남(들어올린 뒤에 누른 것 아닌지)")
     """WAIT(랙 티칭) 중: 현재 TCP − 계산 TCP 를 벽 축(along/across) 으로 분해해 저장."""
     with LOCK:
         R = S.get("rack") or {}
