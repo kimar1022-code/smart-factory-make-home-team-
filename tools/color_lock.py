@@ -67,6 +67,12 @@ def expo(**kw):
 SIDES = {0: "both", 1: "low", 2: "both"}
 
 
+def _ranges_of(c):
+    """9/7: PD.RANGES 는 색에 따라 (lo,hi) 하나 또는 [(lo,hi), ...] 목록(빨강 랩어라운드)."""
+    r = PD.RANGES[c]
+    return r if isinstance(r, list) else [r]
+
+
 def _margin(hsv_px, rng):
     """이 색이 자기 범위의 '위험한 경계'에서 얼마나 떨어져 있나(0~1)."""
     lo, hi = rng
@@ -100,16 +106,18 @@ def score_frame(img, rect):
     #   4점을 멀쩡히 잡은 프레임도 여유 0 → 점수 0 이 됐다(노출 7단계 전부 0점).
     mars = []
     for x, y, a, c, *_ in pts:
-        lo, hi = PD.RANGES[c]
         y0, y1 = max(0, int(y) - 5), int(y) + 6
         x0, x1 = max(0, int(x) - 5), int(x) + 6
         win = hsv[y0:y1, x0:x1].reshape(-1, 3)
-        inr = win[(win[:, 0] >= lo[0]) & (win[:, 0] <= hi[0]) &
-                  (win[:, 1] >= lo[1]) & (win[:, 1] <= hi[1]) &
-                  (win[:, 2] >= lo[2]) & (win[:, 2] <= hi[2])]
-        if len(inr) < 5:
-            mars.append(0.0); continue
-        mars.append(_margin(np.median(inr, axis=0), (lo, hi)))
+        best = 0.0; got = False
+        for lo, hi in _ranges_of(c):
+            inr = win[(win[:, 0] >= lo[0]) & (win[:, 0] <= hi[0]) &
+                      (win[:, 1] >= lo[1]) & (win[:, 1] <= hi[1]) &
+                      (win[:, 2] >= lo[2]) & (win[:, 2] <= hi[2])]
+            if len(inr) < 5:
+                continue
+            got = True; best = max(best, _margin(np.median(inr, axis=0), (lo, hi)))
+        mars.append(best if got else 0.0)
     worst = min(mars)
 
     # 유령: 꼭짓점 근처가 아닌 색 덩어리
@@ -201,10 +209,10 @@ def score_anchored(img, anchors):
         p = min(cands, key=lambda q: math.dist(q[:2], (ax, ay)))
         used.append((p[0], p[1]))
         found += 1
-        lo, hi = PD.RANGES[ac]
         y0, y1 = max(0, int(p[1]) - 5), int(p[1]) + 6
         x0, x1 = max(0, int(p[0]) - 5), int(p[0]) + 6
         win = hsv[y0:y1, x0:x1].reshape(-1, 3)
+        lo, hi = _ranges_of(ac)[0]
         inr = win[(win[:, 0] >= lo[0]) & (win[:, 0] <= hi[0]) &
                   (win[:, 1] >= lo[1]) & (win[:, 1] <= hi[1]) &
                   (win[:, 2] >= lo[2]) & (win[:, 2] <= hi[2])]
@@ -298,7 +306,9 @@ def cmd_calibrate():
         #   원인이었다. RealSense 노출 단위는 0.1ms 라 120Hz 주기(8.333ms) = 83.3 단위의 배수만
         #   한 주기를 정확히 담아 프레임 간 밝기가 일정해진다.
         FLICKER_UNIT = 83.33            # 1/120 초 (0.1ms 단위)
-        LADDER = tuple(round(FLICKER_UNIT * k) for k in (1, 2, 3, 4, 5, 6))   # 83·167·250·333·417·500
+        # 9/7 아침: 직사광에서 83 도 이미 포화(83% 흰색)라 사다리가 전부 0점 → 저노출까지 넓힌다.
+        #   실측 최적 gain16/set42(점 10개·포화 20%), 저녁은 gain64/set333.
+        LADDER = (8, 20, 42) + tuple(round(FLICKER_UNIT * k) for k in (1, 2, 3, 4, 5, 6))
         cands = [("set", v) for v in LADDER]
     # ★밑판 꼭짓점 기준으로 채점한다(베이스가 움직여도 따라간다).
     #   사용자가 확인해 준 정답 위치는 '베이스가 그대로일 때' 참고용으로만 같이 찍는다.

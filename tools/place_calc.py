@@ -382,6 +382,7 @@ BASE_LAST = "/home/ar/bf2_console/base_pose_last.json"
 
 
 SEARCH_ROUNDS = 4          # 베이스 4점 탐색 최대 라운드
+SEARCH_MAX_TOTAL_MM = 70.0 # ★관측자세에서 이보다 멀리 가면 탐색 중단(9/7: 반사광 쫓아 117mm 이탈)
 SEARCH_CLIP_MM = 60.0      # 한 번에 옮기는 카메라 XY 상한
 LOOK_UP_MM = 80.0          # 아무것도 안 보이면 이만큼 올라가 넓게 본다(관측만, 측정은 z650 에서)
 
@@ -396,9 +397,16 @@ def _cam_shift_to_center(px_center, Jinv, p0=(640.0, 360.0), scale=1.0):
 
 
 def _all_color_blobs_center(img):
+    """탐색용 색점 중심. 9/7 사고: 직사광 반사(면적 1600~2000, 화면 끝)만 잡히는데 그걸 쫓아가
+    로봇이 관측자세에서 117mm 벗어남 → ①가장자리 60px 제외 ②면적 상한 800 ③기둥 색 최소 2종."""
     import pillar_dots as PD
-    d = PD.detect(img, None); pts = [p[:2] for lst in d.values() for p in lst if 30 < p[2] < 1500]
-    if len(pts) < 2:
+    d = PD.detect(img, None)
+    pts, cols = [], set()
+    for c, lst in d.items():
+        for p in lst:
+            if 30 < p[2] < 800 and 60 <= p[0] <= 1220 and 60 <= p[1] <= 660:
+                pts.append(p[:2]); cols.add(c)
+    if len(pts) < 2 or len(cols) < 2:            # 기둥은 노랑·빨강·파랑이 섞여 있다. 한 색만 보이면 반사광 의심
         return None, 0
     return (float(np.mean([q[0] for q in pts])), float(np.mean([q[1] for q in pts]))), len(pts)
 
@@ -412,6 +420,10 @@ def find_base_4pts(holding=False):
     import slot_target as STG, hover_align as HA
     Jinv, _mp = STG.load_map()
     for r in range(SEARCH_ROUNDS):
+        _c = st()["tcp"]
+        if math.hypot(_c[0] - OBS[0], _c[1] - OBS[1]) > SEARCH_MAX_TOTAL_MM:
+            speed(SPD_MOVE); move([OBS[0], OBS[1], OBS[2]] + list(OBS[3:]), tag="탐색 한계 초과 → 관측자세 복귀")
+            raise RuntimeError(f"베이스 탐색이 관측자세에서 {SEARCH_MAX_TOTAL_MM:.0f}mm 넘게 벗어남 — 조명/반사 의심(직사광이면 블라인드)")
         cur = st()["tcp"]
         if abs(cur[2] - OBS[2]) > 1.0:
             speed(SPD_MOVE); move([cur[0], cur[1], OBS[2]] + list(OBS[3:]), tag="관측 높이 z650"); cur = st()["tcp"]
@@ -734,7 +746,7 @@ def jamtest(color, secs=40):
 
 RACK_REF = "/home/ar/bf2_console/rack_ref_0905.json"
 RACK_MAP = "/home/ar/bf2_console/cam2robot_rack.json"
-FLICKER_LADDER = (83, 167, 250, 333, 417)   # 9/6: 아침 직사광에서 83 필요 → 추가
+FLICKER_LADDER = (8, 20, 42, 83, 167, 250, 333, 417)   # 9/7 아침 직사광: 83 도 포화(밝기 224) → 저노출 8·20·42 추가(실측 42 에서 검출 최대)
 GAIN_LADDER = (16, 64)                        # 노출 사다리로 안 되면 gain 도 바꿔 본다(낮 16 / 밤 64)
 
 

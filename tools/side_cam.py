@@ -2,7 +2,7 @@
 """측면 웹캠(Logitech C270, /dev/video8) MJPEG 스트림 — 9/4. 삽입 중 벽 밑동 측면 관찰용.
   python3 side_cam.py            # http://<PC>:8771/  (뷰어)  ·  /raw 단일 프레임  ·  /stream MJPEG
 """
-import sys, time, threading
+import sys, os, time, threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import cv2
 
@@ -13,8 +13,10 @@ latest = {"jpg": None, "t": 0}
 
 def worker():
     cap = cv2.VideoCapture(DEV)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    # 9/7: 640×480 에서 기둥 색점이 지름 4~6px(면적 16~31)에 불과해 중심이 불안정 → C270 최대인 1280×720 으로.
+    #   같은 거리에서 선형 2배 = 점 면적 4배. 픽셀 기준(DET['side'] exclude 등)도 2배로 맞출 것.
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(os.environ.get("SIDE_W", "1280")))
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(os.environ.get("SIDE_H", "720")))
     while True:
         ok, f = cap.read()
         if not ok:
