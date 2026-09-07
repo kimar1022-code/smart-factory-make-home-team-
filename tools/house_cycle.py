@@ -381,6 +381,17 @@ def stage_rack(color, teach_rack=False):
         J = np.linalg.inv(Jinv)
         x_hint = rr["Pc0"][0] + float((J @ np.array(dxy))[0])
         e = PC.rack_ends(color, x_hint=x_hint)                    # 부품(4프레임, 같은 색 여러 벽이면 x 로 선택)
+        if not e or abs(e["len_px"] - L0) > 0.10 * L0:
+            # 9/7: 랙은 베이스보다 멀고 어두워 관측자세 저노출(42~83)에선 색점이 안 보인다(파랑 0개) → 노출 사다리로 찾는다.
+            keep = HA.current_expo()
+            for ex in (167, 250, 333, 83):
+                HA.set_expo(ex)
+                e2 = PC.rack_ends(color, x_hint=x_hint)
+                if e2 and abs(e2["len_px"] - L0) <= 0.10 * L0:
+                    log(f"  (랙 관측: 노출 {ex} 로 올려 벽 양끝 확보 — 길이 {e2['len_px']:.0f}px)")
+                    e = e2; break
+            else:
+                if keep: HA.set_expo(keep)
         ok = bool(e) and abs(e["len_px"] - L0) <= 0.10 * L0
         if ok:
             break
@@ -614,7 +625,7 @@ def promote_seat_ref(color):
         for cand in order:
             img = HA.grab(cand)
             d = {c: [[float(q[0]), float(q[1]), float(q[2])] for q in HA._blobs(img, c, 20, cand)
-                     if 60 <= q[0] <= 1220 and 60 <= q[1] <= 660] for c in ("blue", "yellow", "red")}
+                     if 300 <= q[0] <= 1220 and 60 <= q[1] <= 660] for c in ("blue", "yellow", "red")}   # x<300 은 새카메라 왼쪽 케이블 반사 구역
             if sum(len(v) for c, v in d.items() if c != wall_c) >= 2:      # 벽 색 말고 기둥 점 2개 이상
                 src, dots = cand, d; break
         if not dots:
