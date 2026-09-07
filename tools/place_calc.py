@@ -381,6 +381,7 @@ USE_LEGACY_DELTA = False   # ★벽별 상수 보정(WALL_DELTA/RZ_BIAS)은 파�
 BASE_LAST = "/home/ar/bf2_console/base_pose_last.json"
 
 
+BASE_RMS_MAX = 2.5         # 9/7: 기둥 4점이 완전한 직사각형이 아니라 rms 1.55~2.00 이 정상(8/8 재현) — 2.0 기준은 경계에 걸려 1/4 로 떨어졌다
 SEARCH_ROUNDS = 4          # 베이스 4점 탐색 최대 라운드
 SEARCH_MAX_TOTAL_MM = 70.0 # ★관측자세에서 이보다 멀리 가면 탐색 중단(9/7: 반사광 쫓아 117mm 이탈)
 SEARCH_CLIP_MM = 60.0      # 한 번에 옮기는 카메라 XY 상한
@@ -727,7 +728,19 @@ def descend_monitored(color, x, y, rot, zs, g_close):
                     raise RuntimeError("막힘 감시 불가(벽 점이 기준 자리에서 사라짐)")
                 d = max(ds)
                 print(f"    그리퍼 {g} · 벽 점 이동 {d:.1f}px" + (f" (매칭 {len(ds)}/{len(ref)})" if len(ds) != len(ref) else ""), flush=True)
-                step = d - d_prev; d_prev = d
+                step = d - d_prev
+                # 9/7 오판: z+76(채널 밖)에서 0.4→7.8px 로 한 프레임만 튀어 정지. 검출 잡음 한 번에 멈추지 않게 재확인한다.
+                if step > JAM_STEP_PX or d > JAM_TOTAL_PX:
+                    time.sleep(0.35)
+                    cur2 = held_wall_dots(color)
+                    if cur2:
+                        c2 = (sum(p[0] for p in cur2) / len(cur2), sum(p[1] for p in cur2) / len(cur2))
+                        ds2 = [math.hypot(c2[0] - r0[0], c2[1] - r0[1]) for r0 in [min(ref, key=lambda r: math.hypot(c2[0] - r[0], c2[1] - r[1]))]]
+                        d2 = max(ds2)
+                        if d2 - d_prev <= JAM_STEP_PX and d2 <= JAM_TOTAL_PX:
+                            print(f"    (재확인: {d:.1f}px → {d2:.1f}px — 잡음으로 보고 진행)", flush=True)
+                            d = d2; step = d - d_prev
+                d_prev = d
                 if step > JAM_STEP_PX or d > JAM_TOTAL_PX:
                     # ★9/5 실증: 채널 끝까지 내려간 뒤 마지막 1mm 에서 7.5px 밀림 = 밑동이 밑판에 닿은 '안착 접촉'.
                     #   바닥 근처(z_seat+8 이내)의 밀림은 막힘이 아니라 성공 신호 → 멈추고 성공 처리(더 누르지 않음).
@@ -1078,7 +1091,7 @@ def health_gate(max_try=4):
             if px and len(px) == 4:
                 Jinv, _m = STG.load_map(); a = json.load(open(STG.ANCH))
                 pose, rms, _ = STG.base_pose_robot(px, Jinv, tuple(a["C"]), tuple(a["p0"]))
-                if rms < 2.0:
+                if rms < BASE_RMS_MAX:
                     ok += 1; rms_l.append(rms)
         return ok, (sum(rms_l) / len(rms_l) if rms_l else 99)
     ok, rms = score()
