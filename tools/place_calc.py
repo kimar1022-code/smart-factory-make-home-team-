@@ -534,6 +534,9 @@ def run(color, seat=False, do_pick=True, target=None, align=True, len_gate=False
         else:
             print("① 베이스 재확인(든 채, 마스크)"); B = measure_base(holding=True)
             g, info = grasp_measure(color)
+            if g is None and "든 벽 점 0" in str(info):
+                held_wall_dots_expo(color)          # 노출 사다리로 벽 점을 찾은 뒤 재측정
+                g, info = grasp_measure(color)
             if g: grip = g; print(f"  파지 편차({info['how']}): 가로 {info['across_mm']:+.2f} 길이 {info['along_mm']:+.2f}mm 각 {info['dang']:+.2f}°")
             else: print("  ⚠ 파지 편차 측정 불가:", info)
         # ---------- ② 랙 재관측 → 파지
@@ -626,9 +629,9 @@ HELD_AREA_MIN = {"blue": 500, "yellow": 500, "red": 400, "red_s": 250}   # red_s
 HELD_NEAR_PX = 90.0
 
 
-def held_wall_dots_expo(color, ladder=(83, 167, 250)):
-    """★9/7: 든 벽 점은 고노출(83~)이 필요한데 베이스 기둥용 저노출(42)이 걸려 있으면 0개가 된다.
-    지금 노출에서 못 보면 사다리를 올려 가며 찾는다(찾으면 그 노출을 유지 — 이어지는 하강 감시도 같은 노출이어야)."""
+def held_wall_dots_expo(color, ladder=(167, 250, 83, 333, 42, 20)):
+    """★9/7: 든 벽 점이 보이는 노출은 조명에 따라 오르내린다(같은 날 83 에서 보이다가 나중엔 250 에서만 보임).
+    한 방향으로만 올리지 말고 사다리 전체를 훑는다. 찾으면 그 노출을 유지(이어지는 하강 감시도 같은 노출이어야)."""
     w = held_wall_dots(color)
     if w:
         return w
