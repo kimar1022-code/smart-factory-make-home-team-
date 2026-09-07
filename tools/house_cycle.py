@@ -38,6 +38,7 @@ import hover_align as HA         # 부품: align / save_ref / promote_ref / prob
 import house_geometry as HG
 import slot_target as STG        # 부품: pillars_px / base_pose_robot / load_map
 import base_twist as BT          # 부품: markers / board_frame_transform / apply_sim  (ArUco 고정 자)
+import base_depth_corner as BDC  # 부품: depth_mask / detect_rect (INNER_WALL_MODE = 내벽 전용 대응 스위치)
 
 STATE = os.environ.get("HOUSE_STATE", "/home/ar/bf2_console/state/house")
 os.makedirs(os.path.join(STATE, "logs"), exist_ok=True)
@@ -315,7 +316,11 @@ def aruco_correct(px4):
     return out, info
 
 
-def stage_base():
+def stage_base(color=None):
+    # ★9/7 21:1x 사용자 지시("내벽은 외벽 다 끝나고 넣을 거니까 그때만 키게 해"):
+    #   내벽이 밑판 윗면을 가로질러 두 칸으로 끊는 문제 대응은 **red_in 사이클에서만** 켠다.
+    #   외벽 4색은 이 값이 항상 False 라 base_depth_corner 의 예전 경로를 그대로 탄다.
+    BDC.INNER_WALL_MODE = (color == "red_in")
     """관측자세 z650 빈 손 → 기둥 4점(탐색 포함) → ArUco 보정 → 베이스 자세(로컬 로봇축 mm, 원점=관측 화면중심)."""
     set_stage("1 BASE")
     cur = PC.st()["tcp"]
@@ -421,8 +426,10 @@ def rack_measure(color, L0, x_hint, need=RACK_NEED, tries=RACK_TRIES, tol=RACK_L
 
 def stage_rack(color, teach_rack=False):
     set_stage("2 RACK", color=color)
-    # ★9/7 사고: 벽을 문 채 사이클을 시작하면 랙 위에서 그리퍼를 열어 벽을 떨어뜨린다 → 랙으로 가기 전에 확인.
-    if PC.held_wall_dots_expo(color):
+    # ★9/7 21:1x 사용자 지시("내벽하고 외벽 조건 따로 써"): 외벽 4색은 예전 그대로 **사이클 맨 앞**에서 검사한다.
+    #   내벽(red_in)만 랙 SAFE 도착 후(=그리퍼 여는 순간 직전)에 검사한다 — 맨 앞에서 보면 로봇이 베이스 위에
+    #   서 있을 때 기둥 빨간 점(785,522)을 '든 벽'으로 오인해 헛정지하기 때문(20:36 실측).
+    if color != "red_in" and PC.held_wall_dots_expo(color):
         raise Gate("그리퍼에 벽이 이미 있습니다 — 랙으로 가면 여기서 열어 떨어뜨립니다. "
                    "벽을 먼저 내려놓거나 [▶ 든 채로 3단계부터] 로 진행하세요")
     rr = (jload(F["rack"]) or {}).get(color)
@@ -432,6 +439,12 @@ def stage_rack(color, teach_rack=False):
     rp = jload(F["rack_pose"])["tcp"]
     up_to_safe(); PC.speed(SPD_MOVE)
     move([rp[0], rp[1], SAFE_Z, 180.0, 0.0, 180.0], tag="랙 위 SAFE")
+    # ★9/7 사고: 벽을 문 채 사이클을 시작하면 여기서 그리퍼를 열어 벽을 떨어뜨린다 → 열기 직전에 확인.
+    #   ★20:1x: 이 검사를 사이클 맨 앞에서 하면 로봇이 베이스 위에 서 있을 때 기둥 빨간 점(785,522)을
+    #   "든 벽"으로 오인해 헛정지한다. 랙 SAFE 로 온 뒤(베이스가 화면 밖) 여는 순간 직전에 본다.
+    if color == "red_in" and PC.held_wall_dots_expo(color):
+        raise Gate("그리퍼에 벽이 이미 있습니다 — 여기서 열면 떨어집니다. "
+                   "벽을 먼저 내려놓거나 [▶ 든 채로 3단계부터] 로 진행하세요")
     log(f"  그리퍼 열기 → {PC.gripper(rr.get('grip_open', GRIP_OPEN))}")
     move(rp, tag="랙 관측자세")
     # ★9/7 실측: 랙 관측 노출이 색마다 다르다(red_s 는 500 이라야 양끝이 붙는다). 노출이 낮으면
@@ -884,7 +897,7 @@ def run_cycle(color, teach_rack=False):
     _logf = open(os.path.join(STATE, "logs", f"cycle_{color}_{time.strftime('%m%d_%H%M%S')}.log"), "a")
     with LOCK:
         S.update(color=color, err=None, base=None, rack=None, grasp=None, target=None, align=None, seat=None)
-    B = stage_base()                                               # 빈손 베이스 재측정(벽마다)
+    B = stage_base(color)                                          # 빈손 베이스 재측정(벽마다)
     slot_target(color, B)                                          # 기준 없으면 여기서 정지(픽 전에 안다)
     G = stage_rack(color, teach_rack)
     T = slot_target(color, B, G)
@@ -1029,7 +1042,7 @@ def teach_slot_base(color):
             log(f"  ArUco 기준 저장(마커 {sorted(m)})")
         else:
             log(f"  ⚠ ArUco 기준 미생성: {why or f'마커 {len(m)}개(<3)'} — 자 보정 없이 진행")
-    B = stage_base()
+    B = stage_base(color)
     d = jload(F["slot"]) or {}
     d[color] = {"seat_tcp": seat, "base": {"x": B["x"], "y": B["y"], "yaw": B["yaw"]}, "base_rms": B["rms"], "made": time.strftime("%Y-%m-%d %H:%M")}
     jsave(F["slot"], d); _pending_seat.pop(color, None); jsave(_PENDING_F, _pending_seat)
