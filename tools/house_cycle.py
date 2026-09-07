@@ -79,6 +79,7 @@ ALIGN_SRCS = {"blue": ("newcam",)}                # 색별 정렬 카메라(없�
 # 14:33 실기: 랙 비틀림(죠 안 +0.99°)을 새카메라 1점이 못 봐 사용자 2.35mm/0.32° 조그. 손목캠 벽 2점이 죠 안 회전을 보지만
 #   손목캠 기준(13:47)이 삽입 후 밀린 벽 각으로 찍혀 rz +0.5° 편향 → 우선 "measure"(측정·성공 시 승격만) 로 한 사이클 재기준 후 "rz" 로 승격.
 RZ_MEASURE_WARN = 0.6                            # 정렬 중 손목캠이 재는 벽 회전이 이만큼 넘으면 경고(죠 안에서 벽이 돌아감 = 재파지 신호. rz 를 억지로 돌려 맞추지 않는다)
+ALIGN_MAX_MOVE_MM = 4.0    # ★9/7: 정렬이 슬롯 기준에서 이만큼 넘게 옮기면 정지 — 든 벽 점(가까움)과 기둥(멀리)의 시차로 파지 오차가 2배 증폭되는 구조라, 큰 이동은 신뢰할 수 없다(재파지가 답)
 ALIGN_ROLES = {"blue":   {"newcam": "xy", "wrist": "measure"},   # ★rz 고정 모드: rz 담당 없음 → 정렬은 XY 만, rz 는 운반의 절대 명령값 그대로
                "yellow": {"wrist": "xy"},                        # 9/6 19:28 실측: 노랑 자리(rz90)에선 새카메라가 든 벽을 전혀 못 봄 → 손목캠 단독 XY. rz 담당 없음 = rz 고정
                "red":    {"newcam": "xy"},                       # 9/6 20:37 실측: 빨강 자리에선 손목캠이 기둥 1개만 봄(기준 생성 불가), 새카메라는 벽점1+기둥4 → 새카메라 단독 XY(rz 고정)
@@ -199,6 +200,22 @@ def _move_rel_guard(dx, dy, drz, tol=0.3, timeout=40):
     tgt = [c[0] + dx, c[1] + dy, c[2], c[3], c[4], HG.wrap_deg(c[5] + drz)]
     return move(tgt, tol=tol, timeout=timeout, tag=f"상대({dx:+.1f},{dy:+.1f},{drz:+.1f}°)")
 HA.move_rel = _move_rel_guard
+
+
+def check_align_sanity(color, cur):
+    """정렬 결과가 슬롯 기준에서 너무 멀면 정지. 시차 증폭(파지 오차 2배)으로 잘못 간 경우를 잡는다."""
+    ref = (jload(F["slot"]) or {}).get(color)
+    if not ref:
+        return
+    B = jload(F["base_last"]) or {}
+    br = ref.get("base") or {}
+    dx = cur[0] - (ref["seat_tcp"][0] + (B.get("x", 0) - br.get("x", 0)))
+    dy = cur[1] - (ref["seat_tcp"][1] + (B.get("y", 0) - br.get("y", 0)))
+    d = math.hypot(dx, dy)
+    if d > ALIGN_MAX_MOVE_MM:
+        raise Gate(f"정렬 결과가 슬롯 기준(베이스 이동 반영)에서 {d:.1f}mm 벗어남 (dx {dx:+.1f} dy {dy:+.1f}, 허용 {ALIGN_MAX_MOVE_MM}) — "
+                   f"파지가 기준과 많이 달라 정렬이 시차로 증폭했을 수 있음. 다시 집는 것을 권함")
+    log(f"  정렬 온전성: 슬롯 기준 대비 {d:.2f}mm (허용 {ALIGN_MAX_MOVE_MM})")
 
 
 def rz_measure_check(color):
@@ -457,6 +474,10 @@ def grasp_check(color, rack_dang, g_close, gr):
     if PC.load_grasp_ref(color) is None:
         wait_user(f"{color} 좋은 파지 서명 없음: 파지가 정상이면 [파지 서명 저장] → 계속 (아니면 중단)")
     g, info = PC.grasp_measure(color, rack_dang=rack_dang)      # 부품(2점/1점, 축척 핀홀 상수)
+    if g is None and "든 벽 점 0" in str(info):
+        # 9/7: 든 벽 점이 보이는 노출은 조명에 따라 바뀐다 — 사다리로 찾은 뒤 재측정(멈추기 전에 노력)
+        if PC.held_wall_dots_expo(color):
+            g, info = PC.grasp_measure(color, rack_dang=rack_dang)
     if g is None:
         raise Gate("파지 편차 측정 불가: " + str(info))
     G = {"ok": True, "across_mm": info["across_mm"], "along_mm": info["along_mm"], "dang": info["dang"], "how": info["how"], "grip": gr}
@@ -787,8 +808,23 @@ def run_held(color):
     with LOCK:
         G = S.get("grasp"); S.update(color=color, err=None, target=None, align=None, seat=None)
     if not G:
+        # 9/7 사고: 서버 재시작으로 이번 파지 기록이 비면 어제 파랑 스냅샷(2점)을 물려받아 red_s 에 엉뚱한 선보정이 들어갔다.
+        #   같은 색·같은 방식일 때만 재사용하고, 아니면 지금 다시 잰다.
         ls = jload(os.path.join(STATE, "last_state_1327.json")) or {}
-        G = ls.get("grasp"); log(f"  파지 편차: 재시작 전 저장분 사용 {G}")
+        cand = ls.get("grasp")
+        if cand and ls.get("color") == color:
+            G = cand; log(f"  파지 편차: 재시작 전 저장분 사용(같은 색) {G}")
+        else:
+            rr0 = (jload(F["rack"]) or {}).get(color) or {}
+            rd = (S.get("rack") or {}).get("dang")
+            g2, info2 = PC.grasp_measure(color, rack_dang=rd)
+            if g2 is None and "든 벽 점 0" in str(info2) and PC.held_wall_dots_expo(color):
+                g2, info2 = PC.grasp_measure(color, rack_dang=rd)
+            if g2 is None:
+                raise Gate(f"파지 편차 재측정 실패: {info2} — [▶사이클] 로 처음부터")
+            G = {"ok": True, "across_mm": info2["across_mm"], "along_mm": info2["along_mm"],
+                 "dang": info2["dang"], "how": info2["how"], "grip": PC.grip_read()}
+            log(f"  파지 편차 재측정({G['how']}): 가로 {G['across_mm']:+.2f} 길이 {G['along_mm']:+.2f}mm 각 {G['dang']:+.2f}°")
     if not G:
         raise Gate("파지 편차 기록 없음 — [▶사이클] 로 처음부터")
     B = jload(F["base_last"])
