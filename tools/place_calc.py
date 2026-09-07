@@ -625,6 +625,25 @@ HELD_AREA_MIN = {"blue": 500, "yellow": 500, "red": 400, "red_s": 250}   # red_s
 HELD_NEAR_PX = 90.0
 
 
+def held_wall_dots_expo(color, ladder=(83, 167, 250)):
+    """★9/7: 든 벽 점은 고노출(83~)이 필요한데 베이스 기둥용 저노출(42)이 걸려 있으면 0개가 된다.
+    지금 노출에서 못 보면 사다리를 올려 가며 찾는다(찾으면 그 노출을 유지 — 이어지는 하강 감시도 같은 노출이어야)."""
+    w = held_wall_dots(color)
+    if w:
+        return w
+    import hover_align as HA
+    for e in ladder:
+        try:
+            HA.set_expo(e)
+        except Exception:
+            break
+        w = held_wall_dots(color)
+        if w:
+            print(f"  (든 벽 점: 노출 {e} 로 올려 {len(w)}개)", flush=True)
+            return w
+    return []
+
+
 def held_wall_dots(color):
     """물고 있는 벽의 색점(손목캠) — 막힘 감시·파지 판정용.
     ★9/6 정정: 면적 순으로 고르면 노랑 벽을 든 z440 에서 우상 **노란 기둥 점**(면적 ~600)이 든 벽 점으로 섞여 들어와

@@ -164,6 +164,15 @@ def measure(img, color, ref=None, seeds=None, src="wrist"):
     return {"wall": [(q[0], q[1], q[2]) for q in w], "pillars": base_feats(img, w, src)}, None
 
 
+def current_expo():
+    """지금 손목캠 노출값(없으면 None)."""
+    try:
+        import color_lock as CL
+        return (CL.current_settings() or {}).get("exposure")
+    except Exception:
+        return None
+
+
 def set_expo(val):
     """손목캠 노출(플리커 안전값만). color_lock 저장은 건드리지 않는다(관측자세 값은 그대로, 정렬 뒤 restore)."""
     try:
@@ -419,6 +428,15 @@ def check(color, srcs=None, roles=None):
         ref = load_ref(color, src)
         if abs(z - ref["z"]) > 3.0:
             return None, per, f"[{src}] 높이 z{z:.0f} ≠ 기준 z{ref['z']:.0f}"
+        if src == "wrist" and ref.get("expo") and not check.expo_done:
+            # ★9/7 red_s 사고: 기준은 노출 83 에서 찍혔는데 정렬 때 42 라 **노란 기둥 점이 사라져** 파랑 3개로만 맞춤 →
+            #   좌표계가 틀어져 로봇을 y +3mm 엉뚱하게 옮김. 기준을 찍은 노출로 먼저 맞추고 잰다.
+            try:
+                if abs(float(current_expo() or 0) - float(ref["expo"])) > 1.0:
+                    set_expo(float(ref["expo"])); time.sleep(0.6)
+                    print(f"  (기준 촬영 노출 {ref['expo']:.0f} 로 맞춤)", flush=True)
+            except Exception:
+                pass
         img = grab(src)
         meas, why = measure(img, color, ref, None, src)
         if src == "wrist" and (not meas or len(meas["pillars"]) < 2) and not check.expo_done:
@@ -427,6 +445,21 @@ def check(color, srcs=None, roles=None):
                 meas, why = measure(grab(src), color, ref, None, src)
         if not meas:
             return None, per, why
+        # ★기준 특징이 다 안 잡히면 좌표계가 틀어진다(red_s 3mm 오차의 진범).
+        #   멈추기 전에 노출 사다리로 되찾아 본다 — 못 찾을 때만 정지.
+        if src == "wrist" and len(meas["pillars"]) < len(ref["pillars"]):
+            keep = current_expo()
+            for e in ([float(ref["expo"])] if ref.get("expo") else []) + list(HOVER_EXPO_LADDER) + [333.0]:
+                set_expo(e)
+                m2, _w2 = measure(grab(src), color, ref, None, src)
+                if m2 and len(m2["pillars"]) >= len(ref["pillars"]):
+                    print(f"  (기둥 특징 {len(meas['pillars'])}→{len(m2['pillars'])}개: 노출 {e:.0f} 로 되찾음)", flush=True)
+                    meas = m2; break
+            else:
+                if keep: set_expo(keep)
+        if len(meas["pillars"]) < len(ref["pillars"]):
+            return None, per, (f"[{src}] 기둥 특징 {len(meas['pillars'])}개 < 기준 {len(ref['pillars'])}개 — "
+                               f"노출 사다리로도 못 되찾음(기준 노출 {ref.get('expo')}). 좌표계가 틀어져 정지")
         D, why = delta(ref, meas, z, rz, src)
         if D is None:
             return None, per, why
