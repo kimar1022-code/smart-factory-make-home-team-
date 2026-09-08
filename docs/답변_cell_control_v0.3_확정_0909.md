@@ -115,6 +115,7 @@ PHASE_BOUNDARY | STEP_BOUNDARY | HOVER | OBSERVE | MID_MOTION
 | V3 | `immediate=true` 를 그리퍼 개폐 중에 | ACK `stop_mode=DEFERRED_UNSAFE`, `eta_ms≈11000`, 완료 후 `held_at=PHASE_BOUNDARY` |
 | V4 | `immediate=true` 를 삽입 하강 중에 | `held_at=STEP_BOUNDARY`, 지연 ≤1초, **벽이 그리퍼에서 밀리지 않을 것** |
 | V5 | RESUME | 같은 골 유지, 중단된 phase **재시작**, 완료 시 `status=SUCCEEDED` |
+| V5b | **벽을 든 채 하강 중간에서 RESUME** | 정렬 높이로 수직 복귀 → **재측정** → 하강. 그 자리에서 이어 내려가지 않을 것 |
 | V6 | ACK ↔ status 정합 | 모든 케이스에서 ACK `stop_mode` 와 이후 `hold.held_at` 이 §5 표대로 대응 |
 | V7 | 흡착 타임아웃 | 설정값 초과 시 `FAULT`, RESUME 불가(RESET 필요) |
 | V8 | RESUME 전 Vision 재검증 | 부품 이상 시 `FAULT` + 이벤트 발행 |
@@ -129,6 +130,27 @@ PHASE_BOUNDARY | STEP_BOUNDARY | HOVER | OBSERVE | MID_MOTION
 phase 를 "이어붙이기"가 아니라 **"다시 시작"** 하는 이유는 저희 phase 가 전부 **절대 목표**이기 때문입니다 —
 매 phase 가 비전으로 새로 측정하고 목표 TCP 를 다시 계산합니다. 중간 상태를 복원하는 것보다
 다시 측정해서 다시 가는 쪽이 안전하고 결과도 같습니다. 이미 물고 있으면 파지를 유지한 채 그 phase 만 재실행합니다.
+
+### 4-1. 벽을 든 채로 멈췄다 재개하는 경우 — **되올라가 다시 측정합니다**
+
+Pause 가 **삽입 하강 중간**에 걸린 경우(벽이 그리퍼에 들려 채널 안에 반쯤 들어간 상태)는
+멈춘 그 자리에서 이어 내려가지 않습니다.
+
+```
+RESUME → ①벽을 물고 있는지 확인 → ②정렬 높이(z_seat + 85, 내벽 102)까지 수직 복귀
+       → ③비전 재측정·정렬 → ④하강
+```
+
+**이유**: 멈춰 있는 동안 밑판이 밀렸거나 벽이 그리퍼 안에서 조금 움직였을 수 있는데,
+그 자리에서 이어 내려가면 그 변화를 **못 본 채로** 밀어 넣게 됩니다.
+저희 phase 는 전부 절대 목표(측정 → 목표 계산 → 이동)라 되올라가 다시 재는 쪽이 안전하고 결과도 같습니다.
+§4 의 "phase 재시작" 원칙을 삽입 구간에 구체화한 것입니다.
+
+수직 복귀라 벽이 들어온 길을 그대로 되짚어 나옵니다(막힘 감시가 정지 시 쓰는 +25mm 후퇴와 같은 동작).
+재측정에서 이상이 나오면 하강하지 않고 사용자 확인 대기로 갑니다.
+
+> 구현 상태: `house_cycle` 에 `resume_pause` 경로로 **구현 완료**(콘솔 버튼 ⏯).
+> 오케스트레이터의 RESUME 이 이 경로를 호출하도록 배선하는 것은 v0.3 구현 항목입니다. 검증은 V5 에 포함합니다.
 
 ---
 
@@ -159,6 +181,7 @@ RESUME 전 Vision 재검증 → 이상 시 `FAULT` — 동의하며 V8 로 검�
 | Service ACK 의미 | 수락 여부 + **정지 방식**(`stop_mode`) + 최악 지연(`eta_ms`) |
 | 실제 멈춘 지점 | `/cell/status` 의 `hold.held_at` (HELD 일 때만) |
 | RESUME | 기존 ExecuteTask 유지 + 중단된 phase 재시작 |
+| RESUME (벽 든 채) | **정렬 높이 복귀 → 비전 재측정 → 하강** (그 자리에서 이어가지 않음) |
 | 흡착 타임아웃 | `suction_hold_timeout_sec` 파라미터, 기본 60초(임시) |
 | 하위 호환 | `immediate` 미지정 = v0.2 동작 |
 
