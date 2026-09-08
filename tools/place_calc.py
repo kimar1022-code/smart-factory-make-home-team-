@@ -122,8 +122,9 @@ def _held_blobs(img, ranges, area, x_min, x_max=1270, y_min=8, y_max=715, merge_
         x0b, y0b, wb, hb = int(stt[i, 0]), int(stt[i, 1]), int(stt[i, 2]), int(stt[i, 3])
         if x0b <= 1 or y0b <= 1 or x0b + wb >= W - 1 or y0b + hb >= H - 1:
             print(f"    ⚠ 벽 점이 프레임 가장자리에 걸림({x0b},{y0b},{wb}x{hb}) — 중심이 밀릴 수 있음", flush=True)
+        clipped = 1.0 if (x0b <= 1 or y0b <= 1 or x0b + wb >= W - 1 or y0b + hb >= H - 1) else 0.0
         ys, xs = np.nonzero(lab == i); w = g[ys, xs].astype(float) + 1
-        frag.append([float((xs * w).sum()), float((ys * w).sum()), float(w.sum()), a])
+        frag.append([float((xs * w).sum()), float((ys * w).sum()), float(w.sum()), a, clipped, float(y0b)])
     frag.sort(key=lambda q: -q[3])
     groups = []
     for f in frag:
@@ -131,10 +132,12 @@ def _held_blobs(img, ranges, area, x_min, x_max=1270, y_min=8, y_max=715, merge_
         for gr in groups:
             gx, gy = gr[0] / gr[2], gr[1] / gr[2]
             if math.hypot(cx - gx, cy - gy) <= merge_px:
-                gr[0] += f[0]; gr[1] += f[1]; gr[2] += f[2]; gr[3] += f[3]; break
+                gr[0] += f[0]; gr[1] += f[1]; gr[2] += f[2]; gr[3] += f[3]
+                gr[4] = max(gr[4], f[4]); gr[5] = min(gr[5], f[5]); break
         else:
             groups.append(list(f))
-    pts = [(gr[0] / gr[2], gr[1] / gr[2], int(gr[3])) for gr in groups if area[0] <= gr[3] <= area[1]]
+    # ★9/8: (x, y, 면적) 뒤에 (잘림여부, bbox 상단 y) 를 덧붙인다. 기존 코드는 앞 3개만 쓰므로 영향 없다.
+    pts = [(gr[0] / gr[2], gr[1] / gr[2], int(gr[3]), gr[4] > 0.5, gr[5]) for gr in groups if area[0] <= gr[3] <= area[1]]
     pts.sort(key=lambda q: q[1])
     return pts
 
@@ -722,6 +725,23 @@ HELD_X_MIN = {}
 HELD_NEAR_PX = 90.0
 
 
+def held_wall_dots_jam(color):
+    """★9/8 신설 — 막힘 감시 전용 벽 점.
+
+    문제: 든 벽 점이 화면 아래끝에 걸리면(내벽·파랑) 하강할수록 아래가 더 잘려
+      **보이는 부분의 무게중심이 위로 튄다**. 벽은 안 움직였는데 밀린 것처럼 보인다.
+      9/8 실측(내벽): z+9 까지 bbox 높이 56 으로 일정 → z+6 에서 34 로 급감,
+      같은 순간 '이동 14.1px' 로 잡혀 안착 6mm 앞에서 막힘 오판.
+    해법: **잘린 점만** y 를 무게중심 대신 bbox 상단으로 바꾼다. 위쪽은 잘림과 무관해 안 흔들린다.
+      잘리지 않은 점은 지금 그대로(무게중심). 기준·감시가 같은 함수를 쓰므로 정의가 자동으로 일치한다.
+    ※ 이 함수는 막힘 감시에서만 쓴다 — 정렬·파지 판정·서명은 기존 held_wall_dots 그대로.
+    """
+    # ★9/8 철회: 처음엔 '잘린 점은 bbox 상단을 추적'으로 고쳤는데 효과가 없었다 —
+    #   점이 아래로 나가면서 잘리면 남은 조각의 상단도 같이 내려간다(z+6 에서 28.3px, 그대로 오판).
+    #   그래서 위치 정의는 원래대로 두고, 대신 '면적'을 같이 돌려줘 신뢰도 판단에 쓴다.
+    return [(q[0], q[1], q[2]) for q in held_wall_dots(color)]
+
+
 def held_wall_dots_expo(color, ladder=(167, 250, 83, 333, 42, 20)):
     """★9/7: 든 벽 점이 보이는 노출은 조명에 따라 오르내린다(같은 날 83 에서 보이다가 나중엔 250 에서만 보임).
     한 방향으로만 올리지 말고 사다리 전체를 훑는다. 찾으면 그 노출을 유지(이어지는 하강 감시도 같은 노출이어야)."""
@@ -781,6 +801,15 @@ JAM_STEP_PX = 5.0   # 한 단계(3mm) 안에서 이만큼 튀면 막힘 (9/7 사
 #   하강을 z+98 에서 시작하면 33단계 동안 33px 이 쌓여 **누적 15px 은 바닥 전에 반드시 넘는다**.
 #   그 지점이 옛 성공창(바닥 8mm)에 걸리면 z+7 을 '안착'이라 부르고 멈춰 벽이 7mm 덜 들어갔다.
 #   → 누적을 하강 전체가 아니라 **최근 JAM_WIN_STEPS 단계 창**으로 본다(마찰 5px vs 진짜 이탈 15px+).
+# ★9/8 19:07 결론 정정(사용자 육안 "안 내려가 6MM에서"): 면적 반토막(2639→955→395→261→0)은
+#   '점이 화면 밖으로 빠지는 잡음' 이 아니라 **벽이 죠 안에서 위로 밀려 올라가는 실물 현상**이었다.
+#   내벽은 z+6 부근에서 물리적으로 막히고, 로봇이 계속 내려가니 벽만 그리퍼 안에서 위로 밀린다
+#   → 벽 점이 화면 아래로 빠져 면적이 줄고 중심이 튄다. 즉 **막힘 판정이 처음부터 옳았다.**
+#   내가 넣었던 '면적 붕괴 프레임 건너뛰기'와 '무감시 마지막 하강'은 막힌 벽을 계속 눌러
+#   기둥 파손(9/2 사고)으로 가는 길이라 철회한다. 면적 급감은 이제 **막힘 징후로 기록만** 한다.
+#   → 남은 진짜 과제는 검출이 아니라 '내벽이 마지막 6mm 를 왜 못 들어가는가'(XY/rz/깊이).
+SIG_AREA_OK = 0.6    # 감시 기준 노출 선택: 서명 면적의 이 비율 이상이면 '온전한 점' 으로 본다
+JAM_AREA_KEEP = 0.65   # 기준 면적 대비 이 미만 = 벽이 죠 안에서 밀려 올라가는 중(로그 기록용, 판정은 종전 그대로)
 JAM_TOTAL_PX = 15.0 # 창 안에서 이만큼(≈1.4mm) 밀리면 죠에서 빠지는 중 → 막힘
 JAM_WIN_STEPS = 5   # 누적을 보는 창(단계 수) — 15mm 구간
 SEAT_TOUCH_MM = 3.0 # 안착 z 로부터 이 안에서의 밀림만 '바닥 접촉(성공)' 으로 본다(8.0 → 3.0 으로 조임)
@@ -797,23 +826,52 @@ def descend_monitored(color, x, y, rot, zs, g_close):
     """★막힘 감시 하강(9/5 사고 후 신설). 채널 진입부터 안착까지 JAM_STEP 씩.
     매 단계: ①TCP 도달(정체=막힘) ②그리퍼(놓침) ③손목캠 벽 점 이동(죠 안에서 밀림=막힘).
     하나라도 걸리면 즉시 정지 → 25mm 상승 → 예외. 절대 계속 밀지 않는다."""
-    ref = held_wall_dots(color)
-    if not ref:
-        # 9/7: 베이스 기둥은 저노출(42), 든 벽 점은 고노출(83~167)이 필요 — 정렬 단계 노출이 낮게 남으면 여기서 0개가 된다.
-        #   하강 직전에 벽 점이 보이는 노출로 올린다(감시는 벽 점만 쓰므로 기둥은 안 봐도 된다).
-        import color_lock as CL
-        for ex in (83, 167, 250, 333):
+    # ★9/8 저녁 실측(사용자 지적 "저녁이라 점 검출이 안 되는 거 아니냐" — 맞았다):
+    #   파랑을 문 채 같은 자리에서 노출만 바꿔 보니 250 에서 면적 236(조각) / 333 에서 2015(서명 1672 와 일치).
+    #   옛 사다리는 83→167→250→333 순서로 '점이 1개라도 나오는 첫 노출' 에서 멈춰 그 **조각**을 감시 기준으로 잡았고,
+    #   중심이 18px 어긋난 채 내려가다 조각이 사라져 '벽 점 소실' 로 섰다. 벽은 잘 들어가고 있었다.
+    #   → 게이트가 아니라 검출 입력이 틀린 것이므로, ①색마다 서명을 찍은 노출을 먼저 쓰고
+    #     ②그래도 서명 면적의 SIG_AREA_OK 에 못 미치면 사다리를 끝까지 돌려 **면적이 가장 큰 노출**을 고른다.
+    import color_lock as CL
+    _sig = load_grasp_ref(color) or {}
+    _pd = _sig.get("cam1_wall_pd") or []
+    area_sig = sum(float(q[2]) for q in _pd if len(q) > 2)
+    cand = []
+    if _sig.get("expo"):
+        cand.append(float(_sig["expo"]))
+    cand += [e for e in (333.0, 500.0, 250.0, 167.0, 800.0, 83.0) if e not in cand]
+    best = None                                   # (노출, 면적, 점들)
+    for ex in cand:
+        try:
+            CL.expo(set=ex); time.sleep(0.9)
+        except Exception:
+            break
+        d = held_wall_dots_jam(color)
+        a = sum(float(q[2]) for q in d)
+        print(f"  (막힘 감시 노출 {ex:.0f} → 벽 점 {len(d)}개 면적 {a:.0f})", flush=True)
+        if d and (best is None or a > best[1]):
+            best = (ex, a, d)
+        if best and area_sig and best[1] >= SIG_AREA_OK * area_sig:
+            break                                 # 서명 면적에 근접 — 더 돌릴 필요 없다
+    ref = []
+    if best:
+        if best[0] != cand[0] or len(cand) == 1:
             try:
-                CL.expo(set=ex); time.sleep(0.9)
+                CL.expo(set=best[0]); time.sleep(0.9)
             except Exception:
-                break
-            ref = held_wall_dots(color)
-            if ref:
-                print(f"  (막힘 감시: 벽 점이 안 보여 노출 {ex} 로 올림 → {len(ref)}개)", flush=True); break
+                pass
+        ref = held_wall_dots_jam(color) or best[2]
+        a_now = sum(float(q[2]) for q in ref)
+        warn = ""
+        if area_sig and a_now < SIG_AREA_OK * area_sig:
+            warn = f"  ⚠ 서명 {area_sig:.0f} 의 {a_now/area_sig*100:.0f}% 뿐 — 조명이 부족하다"
+        print(f"  (막힘 감시 노출 {best[0]:.0f} 채택 · 벽 점 {len(ref)}개 면적 {a_now:.0f}"
+              + (f" / 서명 {area_sig:.0f}" if area_sig else "") + ")" + warn, flush=True)
     if not ref:
         raise RuntimeError("막힘 감시용 벽 점이 손목캠에 없음 — 하강 금지")
     ref_c = (sum(p[0] for p in ref) / len(ref), sum(p[1] for p in ref) / len(ref))
     print(f"  감시 기준 벽 점 {[(round(p[0]),round(p[1])) for p in ref]}")
+    ref_area = [float(p[2]) for p in ref]                      # ★기준 면적 — 화면 밖으로 나가는지 판단에 쓴다
     d_prev = 0.0
     d_hist = [0.0]                      # 창 누적용 이력
     z0 = st()["tcp"][2]
@@ -832,7 +890,7 @@ def descend_monitored(color, x, y, rot, zs, g_close):
         while True:
             move([x, y, z] + rot, tol=0.8, timeout=25, tag=f"z+{z - zs:.0f}")
             g = grip_read()
-            cur = held_wall_dots(color)
+            cur = held_wall_dots_jam(color)
             # ★빈 손 = 닫힘값 그대로(빨강은 물어도 +1 뿐). red_s 는 물어도 8→8 이라 그리퍼 값으로는 못 가림
             #   → 그리퍼 값이 닫힘값이면 '손목캠 벽 점 소실' 일 때만 놓침으로 판정.
             if g.isdigit() and int(g) <= g_close and not cur:
@@ -848,6 +906,11 @@ def descend_monitored(color, x, y, rot, zs, g_close):
                 if not ds:
                     print(f"    그리퍼 {g} · 벽 점 {len(cur)}개가 기준 근처(60px)에 없음 → 정지", flush=True)
                     raise RuntimeError("막힘 감시 불가(벽 점이 기준 자리에서 사라짐)")
+                a_now = sum(float(q[2]) for q in cur)
+                a_ref = sum(ref_area) or 1.0
+                if a_now < JAM_AREA_KEEP * a_ref:
+                    print(f"    그리퍼 {g} · 벽 점 면적 {a_now:.0f} < 기준 {a_ref:.0f}×{JAM_AREA_KEEP:.2f}"
+                          f" — 벽이 죠 안에서 위로 밀려 올라가는 중(막힘 징후)", flush=True)
                 d = max(ds)
                 print(f"    그리퍼 {g} · 벽 점 이동 {d:.1f}px" + (f" (매칭 {len(ds)}/{len(ref)})" if len(ds) != len(ref) else ""), flush=True)
                 step = d - d_prev
@@ -858,7 +921,7 @@ def descend_monitored(color, x, y, rot, zs, g_close):
                     d2s = []
                     for _ in range(3):
                         time.sleep(0.25)
-                        cur2 = held_wall_dots(color)
+                        cur2 = held_wall_dots_jam(color)
                         if not cur2:
                             continue
                         c2 = (sum(p[0] for p in cur2) / len(cur2), sum(p[1] for p in cur2) / len(cur2))
@@ -895,6 +958,39 @@ def descend_monitored(color, x, y, rot, zs, g_close):
         move([cur[0], cur[1], cur[2] + 25.0] + list(cur[3:]), tol=1.0, timeout=30, tag="후퇴 +25")
         raise
 
+
+
+def descend_plain(color, x, y, rot, zs, g_close):
+    """★내벽 전용 무감시 수직 하강(9/8 사용자 확인: "안 닿는 거 내가 확인했고 그냥 내리면 돼").
+    내벽은 z+6 부근에서 손목캠 벽 점이 화면 아래로 빠져 막힘으로 읽히는데 실물은 닿는 데가 없다.
+    외벽 4색은 descend_monitored 그대로 — 이 경로는 red_in 에서만 쓴다.
+    감시는 안 하지만 ①단계 하강 ②그리퍼 값 ③TCP 도달 실패(정체)는 그대로 본다."""
+    z0 = st()["tcp"][2]
+    n_step = 0
+
+    def _step_mm(z_now, n_done):
+        if n_done < JAM_FINE_HEAD or (z_now - zs) <= JAM_FINE_TAIL_MM + JAM_STEP_FAST:
+            return JAM_STEP
+        return JAM_STEP_FAST
+
+    z = max(zs, z0 - _step_mm(z0, n_step))
+    speed(1)
+    try:
+        while True:
+            move([x, y, z] + rot, tol=0.8, timeout=25, tag=f"z+{z - zs:.0f}")
+            g = grip_read()
+            print(f"    그리퍼 {g} · (내벽 무감시 하강)", flush=True)
+            if z <= zs + 0.01:
+                break
+            n_step += 1
+            z = max(zs, z - _step_mm(z, n_step))
+        print(f"  ★안착 z 도달, 그리퍼 {grip_read()}")
+    except Exception as e:
+        post("stop", {"dry_run": False}); time.sleep(0.5)
+        cur = st()["tcp"]
+        print(f"  ❌ {e} → 25mm 상승")
+        move([cur[0], cur[1], cur[2] + 25.0] + list(cur[3:]), tol=1.0, timeout=30, tag="후퇴 +25")
+        raise
 
 def jamtest(color, secs=40):
     """★막힘 감시 벤치 테스트(로봇 정지, 채널 밖): 벽을 든 채 사용자가 죠 안에서 벽을 살짝 밀면
