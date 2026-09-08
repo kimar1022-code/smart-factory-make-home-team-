@@ -33,11 +33,15 @@ while true; do
     ./start_cam.sh rs >> logs/cam_autostart_start.log 2>&1
     for i in $(seq 1 20); do ss -tlnp 2>/dev/null | grep -q ':8766 ' && break; sleep 1; done
     if ss -tlnp 2>/dev/null | grep -q ':8766 '; then
-      sleep 2; curl -s -m25 "http://127.0.0.1:8766/expo?bright=100" >/dev/null 2>&1
+      # ★9/8 실증: D435 가 재기동되면 WB 가 드라이버 기본값 5500 으로 돌아간다. 그 상태에서는
+      #   같은 노출 250 에서 파랑 든 벽 점 면적이 1823 → 258 로 무너져 막힘 감시가 조각을 붙잡는다.
+      #   밝기 정규화보다 먼저 WB 를 4600 으로 못박는다(측정 근거: 5500/4600/5500 3회 대조).
+      sleep 2; curl -s -m25 "http://127.0.0.1:8766/expo?wb=4600&awb=0" >/dev/null 2>&1
+      curl -s -m25 "http://127.0.0.1:8766/expo?bright=100" >/dev/null 2>&1
       # ★9/5: 색점 검출용으로 보정해 둔 노출을 되돌린다(재기동하면 기본값으로 돌아가
       #   노랑·파랑이 먼저 무너진다 — 실측). 저장본이 없으면 아무 것도 안 한다.
       python3 tools/color_lock.py restore >> logs/color_lock.log 2>&1 || true
-      LOG "8766 기동 완료·밝기 정규화·색점 노출 복원"; D435_UP=1
+      LOG "8766 기동 완료·WB 4600·밝기 정규화·색점 노출 복원"; D435_UP=1
     fi
   elif [ "$USB" -eq 0 ] && [ "$D435_UP" -eq 1 ]; then
     LOG "D435 USB 빠짐 — 대기"; D435_UP=0

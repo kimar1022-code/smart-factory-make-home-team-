@@ -19,7 +19,7 @@ if [ "$MODE" = rs ]; then
   # 9/1: CAM_EXPOSURE=166 = 조명 120Hz 플리커 안전값(다른 노출이면 도트가 35px 씩 흔들림, 실증).
   #      CAM_DET_HZ=8 = 검출 8Hz 분리(CPU 182%→80%).
   # 9/2 실측 임계(파랑 S160=유령 컷·빨강 V55 S160=어두울 때 소실 방지·노랑 S140)
-  CAM_DET_HZ=${CAM_DET_HZ:-8} CAM_EXPOSURE=${CAM_EXPOSURE:-166} CAM_GAIN=${CAM_GAIN:-16} CAM_WB=${CAM_WB:-5500} \
+  CAM_DET_HZ=${CAM_DET_HZ:-8} CAM_EXPOSURE=${CAM_EXPOSURE:-166} CAM_GAIN=${CAM_GAIN:-16} CAM_WB=${CAM_WB:-4600} \
   CAM_BLUE_S=${CAM_BLUE_S:-245} CAM_RED_S=${CAM_RED_S:-160} CAM_RED_V=${CAM_RED_V:-45} \
   CAM_YELLOW_S=${CAM_YELLOW_S:-140} setsid -f python3 cam_server.py --source rs > /tmp/cam_server.log 2>&1
 elif [ "$MODE" = udp ]; then
@@ -34,6 +34,8 @@ sleep 5
 #   관측자세 실측: 밝기 207(노출166) → 빨강 면적변동 50%·노랑 22%, 밝기 108(노출41) → 2%·1%.
 #   → 노출을 박지 말고 '평균 밝기 목표'로 맞춘 뒤 고정한다. WB·PLF 는 이미 고정.
 if [ "$MODE" = rs ]; then
+  # ★9/8: WB 는 "이미 고정" 이 아니다 — 재기동하면 5500 으로 돌아간다(파랑 점 면적 1823→258 실측).
+  curl -s -m 20 "http://127.0.0.1:8766/expo?wb=4600&awb=0" >/dev/null
   curl -s -m 20 "http://127.0.0.1:8766/expo?bright=${CAM_TARGET_BRIGHT:-108}" >/dev/null
   echo "  밝기 정규화 → $(curl -s -m 5 http://127.0.0.1:8766/expo)"
 fi
