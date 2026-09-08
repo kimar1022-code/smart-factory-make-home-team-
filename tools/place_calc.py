@@ -25,7 +25,7 @@ BR = "http://127.0.0.1:8765"
 CAL = "/home/ar/bf2_console/dot_calib.json"
 OBS = [200.0, -330.0, 650.0, 180.0, 0.0, 180.0]      # 관측자세(매핑 기준)
 SAFE_Z, HOVER_Z = 650.0, 478.0
-SEAT_Z = {"blue": 355.0, "yellow": 354.0, "red": 353.0, "red_s": 351.0, "red_in": 338.0}   # 9/2~3 골든 안착 z
+SEAT_Z = {"blue": 355.0, "yellow": 354.0, "red": 353.0, "red_s": 351.0, "red_in": 338.0}
 SPD_MOVE, SPD_DESC, SPD_SEAT = 30, 10, 3
 
 
