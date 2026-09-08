@@ -67,6 +67,11 @@ RACK_RZ_FOLLOW = False                          # 랙 위 벽 각을 rz 로 따�
 #   z440 기준과 어긋나 정렬이 아예 못 돈다 → **하강 정지 높이만** 따로 둔다.
 #   None 이면 평소대로 슬롯 기준의 안착 z 까지 내려간다. 값을 주면 그 높이에서 멈춘다(더 깊이 안 감).
 DESCEND_STOP_Z = None      # 9/8 14:3x 사용자 확정 안착 z(블루 356) 반영 → 정지 높이 해제
+# ★9/8 17:1x 사용자 지시("하강을 내가 누르니까 목표 z 가면 완료 판정 내고 올라가 — 그래야 풀사이클을 한 번에"):
+#   하강 버튼을 누른 것 자체가 사람의 확인이다. 목표 z 까지 **막힘 없이** 내려갔으면 완료로 보고 그대로 개방·상승한다.
+#   단 카메라가 적극적으로 "잘못 앉았다(not_seated)"고 판정하면 그건 그대로 멈춘다 — unknown(판정 불가)만 통과.
+#   기준 승격은 하지 않는다(카메라로 확인된 게 아니므로 오늘 잡은 기준을 덮어쓰지 않는다).
+SEAT_UNKNOWN_AUTO = True
 HOVER_DZ = {"red_in": 102.0}   # 안착 z 위로 얼마에서 정렬하나(기본 85.0). red_in=338+102=440 = 기준을 찍은 높이
 RACK_ANG_MAX = 3.0                              # 랙 위 벽 각 변화 상한(넘으면 벽이 삐뚤게 놓인 것 → 정지)
 ARUCO_WARN_MM, ARUCO_WARN_DEG = 1.5, 0.3        # 고정 자 대비 카메라 복귀 오차 경고
@@ -859,11 +864,17 @@ def stage_descend(color):
     with LOCK: S["seat"] = seat
     log(f"  안착 판정: {seat}")
     if not seated:
-        set_stage("SEAT FAIL", color=color)
-        log(f"🛑 안착 미확인({seat.get('state')}: {seat.get('why')}) — 그리퍼 유지, 그 자리 정지. "
-            "[⛔중단]=이대로 정지(벽은 사용자가 처리) / [▶계속]=사용자가 안착을 육안 확인 → 그리퍼 열고 상승(기준 승격 없음)")
-        wait_user("SEAT FAIL — 그리퍼 유지, 사용자 판단 대기: [⛔중단] 또는 [▶계속](안착 육안 확인 시)")
-        log("  사용자 [▶계속]: 안착 육안 확인으로 간주 → 개방·상승 (카메라 기준 승격 없음)")
+        _unknown = str(seat.get("state", "")) == "unknown"
+        if SEAT_UNKNOWN_AUTO and _unknown:
+            # 하강 버튼 = 사람의 확인. 막힘 없이 목표 z 까지 갔으므로 멈추지 않고 개방·상승한다(기준 승격 없음).
+            log(f"  안착 판정 불가(unknown) — 목표 z 까지 막힘 없이 도달 → 완료로 보고 개방·상승 (기준 승격 없음)")
+            log(f"    (사유: {seat.get('why')})")
+        else:
+            set_stage("SEAT FAIL", color=color)
+            log(f"🛑 안착 미확인({seat.get('state')}: {seat.get('why')}) — 그리퍼 유지, 그 자리 정지. "
+                "[⛔중단]=이대로 정지(벽은 사용자가 처리) / [▶계속]=사용자가 안착을 육안 확인 → 그리퍼 열고 상승(기준 승격 없음)")
+            wait_user("SEAT FAIL — 그리퍼 유지, 사용자 판단 대기: [⛔중단] 또는 [▶계속](안착 육안 확인 시)")
+            log("  사용자 [▶계속]: 안착 육안 확인으로 간주 → 개방·상승 (기준 승격 없음)")
         if not (((jload(os.path.join(STATE, "pose_refs", f"{color}.json")) or {}).get("seat") or {}).get("cams")):
             log("  (안착 기준이 아직 없는 색 → 지금 앉은 자리로 최초 촬영: 로봇은 움직이지 않음)")
             promote_seat_ref(color)          # 부트스트랩 1회. 이후는 seated 성공 시에만 갱신
@@ -879,7 +890,7 @@ def stage_descend(color):
         with LOCK: B = S.get("base")
         promote_slot_ref(color, [at[0], at[1], T["z_seat"], at[3], at[4], at[5]], B)   # z 는 티칭값 유지(접촉 조기정지 z 승격 시 위로 표류 방지)
     release_and_rise(color, rr)
-    set_stage("DONE" if seated else "DONE (안착 미확인·사용자 개방)", color=color)
+    set_stage("DONE" if seated else "DONE (안착 판정 불가·목표 z 도달로 완료)", color=color)
     return seated
 
 
