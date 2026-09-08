@@ -66,6 +66,7 @@ RACK_RZ_FOLLOW = False                          # 랙 위 벽 각을 rz 로 따�
 # ★9/8 책상이 2mm 올라간 상태. 안착 z 를 바꾸면 정렬 높이(안착+HOVER_DZ)까지 따라 움직여
 #   z440 기준과 어긋나 정렬이 아예 못 돈다 → **하강 정지 높이만** 따로 둔다.
 #   None 이면 평소대로 슬롯 기준의 안착 z 까지 내려간다. 값을 주면 그 높이에서 멈춘다(더 깊이 안 감).
+JAM_FREE = {"red_in"}      # ★막힘 감시 없이 내리는 색(사용자 비접촉 확인). 외벽 4색은 절대 넣지 말 것
 DESCEND_STOP_Z = None      # 9/8 14:3x 사용자 확정 안착 z(블루 356) 반영 → 정지 높이 해제
 # ★9/8 17:1x 사용자 지시("하강을 내가 누르니까 목표 z 가면 완료 판정 내고 올라가 — 그래야 풀사이클을 한 번에"):
 #   하강 버튼을 누른 것 자체가 사람의 확인이다. 목표 z 까지 **막힘 없이** 내려갔으면 완료로 보고 그대로 개방·상승한다.
@@ -327,11 +328,32 @@ def aruco_correct(px4):
     return out, info
 
 
+WB_FIX = 4600.0            # ★9/8 실증: WB 5500 이면 노출 250 에서 파랑 든 벽 점 면적이 1823 → 258 로 무너진다
+WB_TOL = 50.0
+
+
+def check_wb():
+    """★9/8: 손목캠 WB 가 4600 인지 사이클마다 확인하고, 어긋나 있으면 되돌린다.
+    카메라가 재기동되면 WB 가 기동 스크립트 기본값으로 돌아가는데 아무도 그걸 안 봤고,
+    그 상태에서는 파랑 벽 점이 조각나 막힘 감시가 조각을 붙잡는다(오늘 파랑 하강 정지의 진짜 원인).
+    설정을 푸는 게 아니라 **측정 조건을 원래대로 되돌리는** 것이라 색 구분 없이 전 사이클에 적용한다."""
+    try:
+        e = json.loads(UR.urlopen("http://127.0.0.1:8766/expo", timeout=5).read().decode())
+        wb, awb = float(e.get("wb", 0)), float(e.get("awb", 0))
+        if abs(wb - WB_FIX) > WB_TOL or awb:
+            UR.urlopen(f"http://127.0.0.1:8766/expo?wb={WB_FIX:.0f}&awb=0", timeout=8).read()
+            e2 = json.loads(UR.urlopen("http://127.0.0.1:8766/expo", timeout=5).read().decode())
+            log(f"  ⚠ 손목캠 WB {wb:.0f}(자동 {awb:.0f}) — 기준 {WB_FIX:.0f} 로 되돌림 → {float(e2.get('wb',0)):.0f}")
+    except Exception as ex:
+        log(f"  (WB 확인 실패: {ex})")
+
+
 def stage_base(color=None):
     # ★9/7 21:1x 사용자 지시("내벽은 외벽 다 끝나고 넣을 거니까 그때만 키게 해"):
     #   내벽이 밑판 윗면을 가로질러 두 칸으로 끊는 문제 대응은 **red_in 사이클에서만** 켠다.
     #   외벽 4색은 이 값이 항상 False 라 base_depth_corner 의 예전 경로를 그대로 탄다.
     BDC.INNER_WALL_MODE = (color == "red_in")
+    check_wb()
     """관측자세 z650 빈 손 → 기둥 4점(탐색 포함) → ArUco 보정 → 베이스 자세(로컬 로봇축 mm, 원점=관측 화면중심)."""
     set_stage("1 BASE")
     cur = PC.st()["tcp"]
@@ -857,15 +879,22 @@ def stage_descend(color):
     if DESCEND_STOP_Z is not None and DESCEND_STOP_Z > z_tgt:
         log(f"  ⚠ 하강 정지 높이 z{DESCEND_STOP_Z:.0f} 적용 — 안착 z{z_tgt:.0f} 까지 내려가지 않는다(사용자 확인용)")
         z_tgt = DESCEND_STOP_Z
-    PC.descend_monitored(color, cur[0], cur[1], [180.0, 0.0, cur[5]], z_tgt, rr.get("grip_close", 13))   # 부품(3mm 단계·벽점 밀림·놓침·정체 → stop+25mm)
+    if color in JAM_FREE:
+        # ★9/8 사용자 확인 "안 닿는 거 내가 확인했고 그냥 내리면 돼" — 내벽만. 외벽 4색은 종전 감시 그대로.
+        log(f"  ⚠ [{color}] 막힘 감시 없이 수직 하강(사용자가 비접촉 확인) — 외벽 경로와 분리")
+        PC.descend_plain(color, cur[0], cur[1], [180.0, 0.0, cur[5]], z_tgt, rr.get("grip_close", 13))
+    else:
+        PC.descend_monitored(color, cur[0], cur[1], [180.0, 0.0, cur[5]], z_tgt, rr.get("grip_close", 13))   # 부품(3mm 단계·벽점 밀림·놓침·정체 → stop+25mm)
     set_stage("3 SEAT CHECK", color=color)
     seat = seat_check(color)
     seated = str(seat.get("state", "")).startswith("seated")
     with LOCK: S["seat"] = seat
     log(f"  안착 판정: {seat}")
+    auto_done = False                    # ★unknown 을 자동 완료로 넘겼는가(= run4 를 계속 이어가도 되는가)
     if not seated:
         _unknown = str(seat.get("state", "")) == "unknown"
         if SEAT_UNKNOWN_AUTO and _unknown:
+            auto_done = True
             # 하강 버튼 = 사람의 확인. 막힘 없이 목표 z 까지 갔으므로 멈추지 않고 개방·상승한다(기준 승격 없음).
             log(f"  안착 판정 불가(unknown) — 목표 z 까지 막힘 없이 도달 → 완료로 보고 개방·상승 (기준 승격 없음)")
             log(f"    (사유: {seat.get('why')})")
@@ -891,7 +920,10 @@ def stage_descend(color):
         promote_slot_ref(color, [at[0], at[1], T["z_seat"], at[3], at[4], at[5]], B)   # z 는 티칭값 유지(접촉 조기정지 z 승격 시 위로 표류 방지)
     release_and_rise(color, rr)
     set_stage("DONE" if seated else "DONE (안착 판정 불가·목표 z 도달로 완료)", color=color)
-    return seated
+    # ★9/8 사용자 지시("하강만 내가 누를게 — 멈추는 거 없이 4벽 연속"): 목표 z 까지 막힘 없이 내려간 뒤
+    #   판정만 불가(unknown)인 경우는 run4 를 이어간다. 판정이 **not_seated** 로 나오면 종전대로 멈춘다.
+    #   기준 승격은 위에서 seated 일 때만 하므로, 이어간다고 해서 unknown 이 기준으로 올라가지는 않는다.
+    return seated or auto_done
 
 
 def stage_descend_reteach(color):
