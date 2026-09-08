@@ -59,7 +59,8 @@ string eta_ms     # HELD 도달까지 최악 예상 지연(ms) — UX 문구 선
   "ver": "0.3",
   "cell_state": "HELD",
   "hold": {
-    "req_id": "…",            // 어느 PAUSE 요청으로 멈췄는지
+    "task_req_id": "…",       // 어느 Task 가 멈췄는지
+    "pause_req_id": "…",      // 어느 PAUSE 요청으로 멈췄는지
     "stop_mode": "DEFERRED_UNSAFE",   // ACK 때 약속한 방식
     "held_at": "STEP_BOUNDARY",       // ★실제로 멈춘 지점
     "phase": "INSERT",                // 멈춘 시점의 phase
@@ -196,8 +197,8 @@ RESUME 전 Vision 재검증 → 이상 시 `FAULT` — 동의하며 V8 로 검�
 | ✅ | `/cell/status` 의 `hold` 블록 (`held_at`·`phase`·`since`·`resumable`) | 검증됨 |
 | ✅ | 흡착 Pause 타임아웃 `suction_hold_timeout_sec` | 검증됨(3초로 낮춰 FAULT 확인) |
 | ✅ | 하위 호환 (`immediate` 없는 v0.2 호출) | 검증됨 |
-| ⬜ | phase **중간** 즉시정지 | 미구현 |
-| ⬜ | 정지 사유 태그 `PAUSE`/`ABORT`/`ERROR` | 미구현 |
+| ✅ | phase **중간** 즉시정지 (C5) | 검증됨 |
+| ✅ | 정지 사유 태그 `PAUSE`/`ABORT`/`ERROR` (C6) | 검증됨 |
 | ⬜ | RESUME 전 Vision 재검증 | 미구현 |
 
 **즉시정지가 아직 없다는 사실을 숨기지 않습니다.** `immediate_pause_enabled` 파라미터가 `false` 인 동안
@@ -224,15 +225,42 @@ RESUME → cell_state=EXECUTE, hold=null, 같은 골 유지 → 최종 SUCCEEDED
 > `hold.phase` 는 **"재개하면 그때부터 도는 phase"** 입니다.
 > `active_task.phase`(직전에 끝난 phase)와 다릅니다 — 두 값이 다르게 보이는 것이 정상입니다.
 
+#### C5·C6 구현 완료 (2026-09-09 오전)
+
+**요청하신 V2 를 실제로 성립시켰습니다.** 즉시정지가 붙은 상태에서도 ExecuteTask 는 살아 있습니다.
+
+핵심은 **예외 타입을 나눈 것**입니다. PAUSE 로 인한 모션 중단은 `PauseInterrupt` 로 올라오고,
+이 예외는 Task 종료 판정(`_finish`)을 **아예 타지 않습니다**. `CellError`(장비·비전 오류)나
+ABORT 와 경로를 공유하면 정확히 지적하신 사고가 납니다. `stop()` 에도 `reason=PAUSE|ABORT|ERROR`
+태그를 붙여 호출자가 뒤에 무엇을 할지 구분합니다.
+
+RESUME 하면 **끊긴 phase 를 처음부터 다시 시작**합니다(§4·§4-1 그대로).
+
+#### 실측 로그 (도메인 99, sim, `immediate_pause_enabled:=true`)
+
+| 케이스 | ACK `stop_mode` | `hold.held_at` | `hold.phase` | Task 결과 |
+|---|---|---|---|---|
+| MOVE/OBSERVE 중 | `IMMEDIATE` | `MID_MOTION` | OBSERVE | **SUCCEEDED** |
+| **PICK(그리퍼) 중** | `DEFERRED_UNSAFE` | `PHASE_BOUNDARY` | REORIENT | **SUCCEEDED** |
+| **INSERT 중** | `IMMEDIATE` | `STEP_BOUNDARY` | INSERT | **SUCCEEDED** |
+| 중간 HELD 에서 ABORT | — | — | — | `CANCELED` (의도대로) |
+| 흡착 물고 Pause 초과 | — | — | — | `FAILED` / `E201` |
+
+세 케이스 모두 **ACK 의 `stop_mode` 와 `hold.stop_mode` 가 일치**합니다(V6). 서버 쪽에서
+`pause_req_id` 로 "내가 보낸 그 PAUSE 로 멈춘 게 맞는지"까지 대조하실 수 있습니다.
+
+> 검증 중 저희 쪽 결함 2건을 잡았습니다 — ①`hold.stop_mode` 가 ACK 의 약속을 안 싣고
+> 항상 `AT_PHASE_BOUNDARY` 로 나가던 것(V6 불일치) ②`hold.req_id` 에 Task 의 req_id 가
+> 들어가 어느 PAUSE 로 멈췄는지 알 수 없던 것. 둘 다 고쳤고, 그래서 필드가
+> `task_req_id` / `pause_req_id` 둘로 나뉘었습니다.
+
 #### 남은 순서
 
-**C6(정지 사유 태그) → C5(즉시정지)** 순서로 갑니다. 반대로 하면 서버팀이 지적하신 V2 가 깨집니다.
+남은 것은 **C8(RESUME 전 Vision 재검증)** 과 **C9(오케스트레이터 RESUME → 벽 든 채 재측정 경로 배선)** 입니다.
 
-한 가지 정확히 말씀드립니다 — **V2 는 지금은 자동으로 통과합니다.** 현재 PAUSE 는 MoveGroup 골을
-취소하지 않고 phase 경계까지 기다리기만 하기 때문입니다. **그 위험은 C5 를 구현하는 순간 생깁니다.**
-검증 시점을 그때로 잡아 주시면 됩니다.
-
-이후 도메인 99 격리 모의(V1~V9) → 실기 순입니다. 실기 스택과 같은 도메인에서는 시험하지 않습니다(8/11 사고 이후 철칙).
+그리고 **여기까지는 전부 sim 입니다.** `immediate_pause_enabled` 기본값은 `false` 로 두었습니다 —
+실기에서 FR5 MoveGroup 골 취소가 실제로 감속 정지하는지, 삽입 중 스텝 경계 정지에서 벽이
+그리퍼에서 밀리지 않는지(V4)는 **실물로 확인한 뒤** 켜겠습니다. 그 전까지 실기는 v0.2 동작입니다. 실기 스택과 같은 도메인에서는 시험하지 않습니다(8/11 사고 이후 철칙).
 
 ### 저희가 확인 부탁드리는 것 하나
 

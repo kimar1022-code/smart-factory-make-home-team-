@@ -105,6 +105,19 @@ ERROR_STATE = {
 }
 
 
+class PauseInterrupt(Exception):
+    """★v0.3 C5: **PAUSE 로 인해** 진행 중인 모션이 끊겼다는 신호. 오류가 아니다.
+
+    서버팀 요청(2026-09-09 V2): FR5 즉시정지의 MoveGroup 골 취소가 /cell/execute_task 의
+    CANCELED/FAILED 로 전파되면 안 된다. 그래서 PAUSE 로 인한 중단은 CellError 와 **다른 예외**로
+    올려서, Task 종료 판정(_finish)을 아예 타지 않고 HELD 루프로만 들어가게 한다.
+    ABORT·장비오류와 경로를 공유하면 정확히 그 사고가 난다."""
+
+    def __init__(self, phase, where):
+        super().__init__(f"PAUSE during {phase} ({where})")
+        self.phase, self.where = phase, where
+
+
 class CellError(Exception):
     """phase 실행 실패. code=계약 §6, detail=사람이 읽는 설명."""
 
@@ -149,10 +162,21 @@ class SimAdapter:
                 self.node.set_parameters(
                     [rclpy.parameter.Parameter("inject_error", value="")])
                 raise CellError(code, f"sim 주입 오류 ({phase}, part={part})")
-        time.sleep(float(self.node.get_parameter("sim_phase_sec").value))
+        # ★v0.3 C5: 한 번에 자지 않고 잘게 쪼개 pause_now 를 본다 — 실기의 '3mm 스텝 경계' 에 대응.
+        #   실기 RealAdapter 도 같은 규칙이다(스텝 사이에서만 끊는다 → 벽이 죠에서 밀리지 않는다).
+        total = float(self.node.get_parameter("sim_phase_sec").value)
+        slice_s = 0.05
+        done = 0.0
+        while done < total:
+            if self.node.pause_now.is_set():
+                where = "STEP_BOUNDARY" if phase == "INSERT" else "MID_MOTION"
+                raise PauseInterrupt(phase, where)
+            time.sleep(min(slice_s, total - done))
+            done += slice_s
 
-    def stop(self, robot):
-        pass
+    def stop(self, robot, reason="ABORT"):
+        # sim 은 실제로 세울 게 없다. 사유만 기록해 둔다(로그 대조용).
+        self.node.last_stop_reason = reason
 
 
 class RealAdapter:
@@ -320,7 +344,11 @@ class RealAdapter:
         else:
             raise CellError("E202", f"ZK 가 모르는 phase {phase}")
 
-    def stop(self, robot):
+    def stop(self, robot, reason="ABORT"):
+        """reason: PAUSE | ABORT | ERROR — ★어느 쪽이든 모션을 세우는 동작 자체는 같지만,
+        호출자가 그 뒤에 무엇을 하는지가 다르다(PAUSE 는 Task 를 끝내지 않는다). 여기서는
+        사유를 기록만 하고, 종료 판정은 전적으로 호출자가 한다."""
+        self.node.last_stop_reason = reason
         try:
             if robot == "fr5":
                 self.fr5.stop()
@@ -374,6 +402,12 @@ class CellOrchestrator(Node):
         self.cell_state = "IDLE"
         self.state_reason = ""             # FAULT/ABORTED 사유 (status.error 로 노출)
         self.hold_info = None              # v0.3: HELD 일 때만 채워지는 status.hold 블록
+        self.last_stop_reason = ""         # v0.3 C6: 마지막 stop() 의 사유(PAUSE|ABORT|ERROR)
+        self.pause_now = threading.Event()  # v0.3 C5: 진행 중인 모션을 지금 끊으라는 신호
+        # ★V6(ACK↔status 정합): ACK 에서 약속한 정지 방식과 그 PAUSE 의 req_id 를 기억해 둔다.
+        #   hold 블록이 이 값을 그대로 실어야 서버가 "약속대로 섰는지" 대조할 수 있다.
+        self.pause_stop_mode = ""
+        self.pause_req_id = ""
         self.pause_immediate = False       # 이번 PAUSE 가 immediate 요청이었는가
         self.active = None                 # TaskRun
         self.results = {}                  # req_id -> ExecuteTask.Result (멱등 캐시)
@@ -458,12 +492,26 @@ class CellOrchestrator(Node):
                 self.pause_req = True
                 self.pause_immediate = bool(getattr(req, "immediate", False))
                 stop_mode, eta_ms = self._plan_stop(self.pause_immediate)
+                self.pause_stop_mode = stop_mode
+                self.pause_req_id = req.req_id
                 ok = True
-                detail = ("현재 안전 단위 완료 후 HELD 진입" if stop_mode == "AT_PHASE_BOUNDARY"
-                          else "현재 모션까지 즉시 감속 정지")
-                if self.pause_immediate and stop_mode == "AT_PHASE_BOUNDARY":
-                    # ★거짓 ACK 금지: immediate 를 받아놓고 못 세우면 그 사실을 그대로 말한다.
-                    detail += " (immediate 요청 — 즉시정지 경로 미구현, v0.3 C5)"
+                if stop_mode == "IMMEDIATE":
+                    # ★지금 세운다. 사유를 PAUSE 로 태그해야 Task 종료 경로를 안 탄다(C6).
+                    run = self.active
+                    self.pause_now.set()
+                    try:
+                        self.adapter.stop(run.robot if run else "", reason="PAUSE")
+                    except Exception as ex:
+                        self.get_logger().warning(f"즉시정지 stop() 실패: {ex}")
+                    detail = "현재 모션까지 즉시 감속 정지"
+                elif stop_mode == "DEFERRED_UNSAFE":
+                    detail = ("지금 구간은 즉시정지 불가 — 가장 가까운 safe point 에서 정지 "
+                              "(그리퍼 개폐·흡착 동작은 중단하면 복구 불가 알람)")
+                else:
+                    detail = "현재 안전 단위 완료 후 HELD 진입"
+                    if self.pause_immediate:
+                        # ★거짓 ACK 금지: immediate 를 받아놓고 못 세우면 그 사실을 그대로 말한다.
+                        detail += " (immediate 요청 — 즉시정지 경로 미구현, v0.3 C5)"
             elif st == "HELD":
                 ok, detail = True, "이미 HELD"
                 stop_mode, eta_ms = "NOT_APPLICABLE", 0
@@ -473,6 +521,8 @@ class CellOrchestrator(Node):
             if st == "HELD" and self.active is not None:
                 self.pause_req = False
                 self.pause_immediate = False
+                self.pause_now.clear()
+                self.pause_stop_mode = ""
                 self.hold_info = None
                 self.change_state("EXECUTE", "RESUME")
                 ok = True
@@ -486,6 +536,7 @@ class CellOrchestrator(Node):
             if st in ("EXECUTE", "HELD"):
                 self.abort_req = True
                 self.pause_req = False     # HELD 대기 중이면 깨워서 중단시킨다
+                self.pause_now.clear()
                 self.hold_info = None
                 ok, detail = True, "현재 태스크 안전 중단"
             else:
@@ -585,6 +636,10 @@ class CellOrchestrator(Node):
         for i, part in enumerate(parts, start=1):
             run.current_item = i
             for phase in phases:
+              # ★v0.3 C5: PAUSE 로 phase 가 중간에 끊기면 그 phase 를 **다시 시작**한다(계약 §4).
+              #   우리 phase 는 전부 절대 목표(측정→목표 계산→이동)라 이어붙이기보다 재실행이 안전하고
+              #   결과도 같다. 벽을 든 채였다면 재실행이 곧 "정렬 높이로 되올라가 다시 측정"이다(§4-1).
+              while True:
                 # --- 안전 단위 경계: 중단·일시정지·취소는 여기서만 판단 ---
                 r = self._boundary(gh, run, robot, next_phase=phase)
                 if r is not None:
@@ -607,10 +662,19 @@ class CellOrchestrator(Node):
                             f"({'ok' if cand.yaw_valid else cand.orientation_source}) "
                             f"[{cand.position.x:.3f},{cand.position.y:.3f},"
                             f"{cand.position.z:.3f}]@{cand.frame_id}")
+                except PauseInterrupt as pi:
+                    # ★서버팀 요청 V2: 여기서 절대 _finish() 를 타면 안 된다.
+                    #   PAUSE 로 인한 모션 취소는 Task 종료가 아니다 — ExecuteTask 는 살아 있고
+                    #   HELD 로만 들어간다. ABORT·오류와 예외 타입이 다른 이유가 이것이다.
+                    r = self._hold_mid_motion(gh, run, robot, pi)
+                    if r is not None:
+                        return r            # HELD 중에 ABORT/Cancel 이 온 경우만 종료
+                    continue                # RESUME → 같은 phase 재시작
                 except CellError as e:
                     return self._fail(gh, run, robot, e)
                 step += 1
                 run.progress = step / total_steps
+                break
             slot = part.get("slot")
             if slot:
                 run.completed.append(slot)
@@ -622,6 +686,39 @@ class CellOrchestrator(Node):
         self.change_state("IDLE", "task done")
         return self._finish(gh, run, "SUCCEEDED", "", "")
 
+    def _hold_mid_motion(self, gh, run, robot, pi):
+        """★v0.3 C5: phase **중간**에서 PAUSE 로 멈춘 뒤의 HELD 대기.
+        계속해도 되면 None, ABORT/Cancel 로 끝내야 하면 Result 를 돌려준다.
+        _finish() 를 타지 않는 것이 핵심 — Task 는 살아 있어야 한다(서버팀 V2)."""
+        self.pause_req = False
+        self.pause_now.clear()
+        self.hold_info = {
+            "task_req_id": run.goal.req_id,
+            "pause_req_id": self.pause_req_id,
+            "stop_mode": self.pause_stop_mode or "IMMEDIATE",
+            "held_at": pi.where,          # MID_MOTION | STEP_BOUNDARY
+            "phase": pi.phase,            # 재개하면 이 phase 를 처음부터 다시 돈다
+            "since": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            "resumable": True,
+        }
+        self.change_state("HELD", f"PAUSE(immediate) during {pi.phase}")
+        self.get_logger().info(f"즉시정지 HELD — {pi.phase} 중간({pi.where}). "
+                               f"RESUME 시 {pi.phase} 를 다시 시작한다")
+        t_hold = time.monotonic()
+        suction_to = float(self.get_parameter("suction_hold_timeout_sec").value)
+        while self.cell_state == "HELD":
+            if self.abort_req or gh.is_cancel_requested:
+                self.hold_info = None
+                return self._boundary(gh, run, robot, next_phase=pi.phase)
+            if suction_to > 0 and run.holding_suction and time.monotonic() - t_hold > suction_to:
+                self.hold_info = None
+                self.change_state("FAULT", f"흡착 유지 Pause 가 {suction_to:.0f}초 초과 — 낙하 위험")
+                return self._finish(gh, run, "FAILED", "E201",
+                                    f"흡착 Pause 타임아웃 {suction_to:.0f}s 초과 (진공 피드백 없음)")
+            time.sleep(0.1)
+        self.hold_info = None
+        return None
+
     def _boundary(self, gh, run, robot, next_phase=None):
         """phase 사이 경계 처리. 계속이면 None, 종료면 Result.
         next_phase = 이 경계를 통과하면 **다음에 돌 phase**. HELD 로 들어갈 때
@@ -629,11 +726,11 @@ class CellOrchestrator(Node):
         (run.phase 는 직전에 끝난 phase 라 여기서 쓰면 서버가 헷갈린다)."""
         if self.abort_req:
             self.abort_req = False
-            self.adapter.stop(robot)
+            self.adapter.stop(robot, reason="ABORT")
             self.change_state("ABORTED", "ABORT by FMS")
             return self._finish(gh, run, "CANCELED", "", "ABORT 요청으로 중단")
         if gh.is_cancel_requested:
-            self.adapter.stop(robot)
+            self.adapter.stop(robot, reason="ABORT")
             self.change_state("IDLE", "action cancel")
             return self._finish(gh, run, "CANCELED", "", "Action Cancel 로 중단")
         if self.pause_req:
@@ -641,8 +738,9 @@ class CellOrchestrator(Node):
             # ★v0.3: 실제로 멈춘 지점을 여기서 기록한다(서비스 ACK 가 아니라 /cell/status 로 나간다).
             #   지금은 phase 경계에서만 서므로 항상 PHASE_BOUNDARY. C5 구현 시 STEP_BOUNDARY 등이 생긴다.
             self.hold_info = {
-                "req_id": run.goal.req_id,
-                "stop_mode": "AT_PHASE_BOUNDARY",
+                "task_req_id": run.goal.req_id,          # 어느 Task 가 멈췄는지
+                "pause_req_id": self.pause_req_id,       # 어느 PAUSE 요청으로 멈췄는지
+                "stop_mode": self.pause_stop_mode or "AT_PHASE_BOUNDARY",   # ACK 에서 약속한 방식 그대로
                 "held_at": "PHASE_BOUNDARY",
                 "phase": next_phase or run.phase,   # 재개하면 여기서부터 돈다
                 "since": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
