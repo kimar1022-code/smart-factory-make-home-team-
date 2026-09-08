@@ -145,6 +145,12 @@ class TaskRun:
         #   진공에는 피드백이 없어서(E201 검출 불가) 이 플래그가 유일한 근거다 —
         #   "명령을 보냈다"는 사실일 뿐 실제로 붙어 있다는 보장이 아니라는 점을 잊지 말 것.
         self.holding_suction = False
+        # ★v0.3 C9: FR5 가 부품(벽)을 물고 있는가. PICK 성공 → True, RETREAT 완료 → False.
+        self.holding_part = False
+        # ★v0.3 C9: 이번 phase 실행이 "일시정지에서 재개된 것"인가. 어댑터가 이 값을 보고
+        #   벽을 든 채면 정렬 높이로 되올라가 다시 측정한 뒤 내려간다(계약 §4-1).
+        #   한 번 소비되면 어댑터가 False 로 되돌린다.
+        self.resume_from_hold = False
 
 
 class SimAdapter:
@@ -154,6 +160,14 @@ class SimAdapter:
         self.node = node
 
     def run_phase(self, robot, phase, part, run):
+        if run.resume_from_hold:
+            # ★C9: 실기 FR5 는 여기서 '정렬 높이로 되올라가 재측정' 을 먼저 한다(계약 §4-1).
+            #   sim 은 그 사실만 남긴다. 한 번 쓰면 소비한다.
+            run.resume_from_hold = False
+            self.node.get_logger().info(
+                f"[sim] 일시정지 재개 — {phase} 를 처음부터 다시 실행"
+                + (" (부품 든 채 → 실기라면 정렬 높이 복귀 후 재측정)"
+                   if (run.holding_part or run.holding_suction) else ""))
         spec = self.node.get_parameter("inject_error").value
         if spec:
             code, _, at = spec.partition("@")
@@ -177,6 +191,18 @@ class SimAdapter:
     def stop(self, robot, reason="ABORT"):
         # sim 은 실제로 세울 게 없다. 사유만 기록해 둔다(로그 대조용).
         self.node.last_stop_reason = reason
+
+    def verify_held(self, robot, run):
+        """sim: inject_error 로 '재개했더니 부품이 없더라' 를 재현할 수 있게만 해 둔다."""
+        spec = self.node.get_parameter("inject_error").value
+        if spec.startswith("E201@RESUME"):
+            self.node.set_parameters([rclpy.parameter.Parameter("inject_error", value="")])
+            return False, "sim 주입: 재개 시 부품 없음"
+        if spec.startswith("UNVERIFIABLE@RESUME"):
+            # ★실기 ZK 진공처럼 '검증 수단 자체가 없는' 경우를 sim 에서도 돌려보기 위한 주입.
+            self.node.set_parameters([rclpy.parameter.Parameter("inject_error", value="")])
+            return None, "sim 주입: 검증 수단 없음"
+        return True, "sim"
 
 
 class RealAdapter:
@@ -296,6 +322,23 @@ class RealAdapter:
             raise CellError("E202", f"{robot} '{pose_name}' 이동 실패 "
                                     f"code={res.error_code} {res.error_string}")
 
+    def verify_held(self, robot, run):
+        """★재개 전 '아직 물고 있는가' 확인. (ok, why) — ok=None 이면 **검증 수단이 없다**는 뜻이고,
+        호출자는 그것을 통과로 취급하지 않고 기록만 한다(모르는 것을 안다고 하지 않는다).
+
+        FR5 : 손목캠으로 든 벽의 색점을 본다. 실제 판정기는 bf2_console/place_calc 의
+              held_wall_dots 계열(9/7~9/8 실기로 다듬은 것)이고, 여기서는 그 결과를
+              위임받는다. 아직 배선 전이라 None 을 돌려준다 — ★C9 남은 작업.
+        ZK  : 진공에 피드백이 없다(계약 §6 E201 을 셀이 검출 불가, 8/11 기록).
+              카메라로 흡착판 아래 부품을 보는 수단이 아직 없어 원리적으로 None 이다.
+              근본 해결은 진공 압력 스위치 추가."""
+        if robot == "fr5":
+            fn = getattr(self.fr5, "verify_held", None)
+            if fn is None:
+                return None, "FR5 어댑터에 verify_held 미배선 (place_calc.held_wall_dots 위임 예정)"
+            return fn(run)
+        return None, "ZK 진공은 피드백이 없다 — 압력 스위치 추가 전까지 검증 불가"
+
     def run_phase(self, robot, phase, part, run):
         if robot == "fr5":
             return self.fr5.run_phase(phase, part, run)
@@ -373,6 +416,8 @@ class CellOrchestrator(Node):
         #   Pause 가 길어지면 부품이 조용히 떨어져도 아무도 모른다 — 그 공백을 시간으로 막는다.
         #   60.0 은 임시 후보값. 실기 장시간 흡착 검증 후 확정. 0 = 무제한(권장하지 않음).
         self.declare_parameter("suction_hold_timeout_sec", 60.0)
+        # ★v0.3 C8 서버팀 합의: RESUME 전에 부품이 아직 붙어 있는지 비전으로 재검증. 이상 시 FAULT.
+        self.declare_parameter("revalidate_on_resume", True)
         # --- 비전 연동 (v0.3 Final 확정판, 8/11) ---
         self.declare_parameter("vision_enabled", True)
         self.declare_parameter("vision_test_mode", True)   # 캘리브 전 = true 고정
@@ -641,7 +686,12 @@ class CellOrchestrator(Node):
               #   결과도 같다. 벽을 든 채였다면 재실행이 곧 "정렬 높이로 되올라가 다시 측정"이다(§4-1).
               while True:
                 # --- 안전 단위 경계: 중단·일시정지·취소는 여기서만 판단 ---
-                r = self._boundary(gh, run, robot, next_phase=phase)
+                # ★재개 전 재검증(C8)이 여기서 CellError 를 올릴 수 있다. 감싸지 않으면
+                #   액션 골이 Result 없이 abort 돼 서버가 error_code 도 못 받는다(9/9 실측).
+                try:
+                    r = self._boundary(gh, run, robot, next_phase=phase)
+                except CellError as e:
+                    return self._fail(gh, run, robot, e)
                 if r is not None:
                     return r
                 run.phase = phase
@@ -652,6 +702,10 @@ class CellOrchestrator(Node):
                         run.holding_suction = True
                     elif phase == "RELEASE":
                         run.holding_suction = False
+                    elif phase == "PICK":
+                        run.holding_part = True
+                    elif phase == "RETREAT":
+                        run.holding_part = False
                     # OBSERVE = 관찰 자세 도착·정지 후 비전 요청 (v0.3 §10)
                     if (phase == "OBSERVE"
                             and self.get_parameter("vision_enabled").value):
@@ -662,6 +716,8 @@ class CellOrchestrator(Node):
                             f"({'ok' if cand.yaw_valid else cand.orientation_source}) "
                             f"[{cand.position.x:.3f},{cand.position.y:.3f},"
                             f"{cand.position.z:.3f}]@{cand.frame_id}")
+                # ★_hold_mid_motion 이 올리는 CellError(재개 전 재검증 실패)는 아래
+                #   except CellError 가 받는다 — run_phase 와 같은 try 안이라 자동으로 처리된다.
                 except PauseInterrupt as pi:
                     # ★서버팀 요청 V2: 여기서 절대 _finish() 를 타면 안 된다.
                     #   PAUSE 로 인한 모션 취소는 Task 종료가 아니다 — ExecuteTask 는 살아 있고
@@ -678,13 +734,48 @@ class CellOrchestrator(Node):
             slot = part.get("slot")
             if slot:
                 run.completed.append(slot)
-        r = self._boundary(gh, run, robot)      # 마지막 phase 후 ABORT 반영
+        try:
+            r = self._boundary(gh, run, robot)  # 마지막 phase 후 ABORT 반영
+        except CellError as e:
+            return self._fail(gh, run, robot, e)
         if r is not None:
             return r
         self.publish_event("STEP_DONE", goal.step_id, robot, "",
                            f"{goal.task_type} 완료")
         self.change_state("IDLE", "task done")
         return self._finish(gh, run, "SUCCEEDED", "", "")
+
+    def _on_resume(self, run, phase):
+        """★v0.3 C8·C9 — HELD 를 빠져나와 phase 를 다시 돌기 **직전**에 부르는 훅.
+
+        C8 (RESUME 전 Vision 재검증, 서버팀 합의 2026-09-09):
+          멈춰 있는 동안 부품이 떨어졌을 수 있다. 특히 흡착은 피드백이 없어(E201 검출 불가)
+          "붙어 있다"는 근거가 명령 이력뿐이다. 재개 전에 눈으로 한 번 더 본다.
+          이상이면 CellError 를 올려 FAULT 로 간다(계속 진행하지 않는다).
+
+        C9 (벽을 든 채 재개):
+          run.resume_from_hold 를 세워 어댑터에 알린다. 어댑터는 이 값이 True 면
+          **정렬 높이로 되올라가 다시 측정한 뒤** 내려간다(§4-1). 멈춘 자리에서 이어
+          내려가면 그 사이 밑판이 밀린 것을 못 본 채로 밀어 넣게 된다.
+        """
+        run.resume_from_hold = True
+        if not (run.holding_part or run.holding_suction):
+            return                      # 빈 손이면 재검증할 것이 없다
+        if not bool(self.get_parameter("revalidate_on_resume").value):
+            self.get_logger().warning(
+                "재개 전 Vision 재검증이 꺼져 있다 — 부품이 떨어졌어도 모른 채 진행한다")
+            return
+        held = "흡착" if run.holding_suction else "그리퍼"
+        ok, why = self.adapter.verify_held(run.robot, run)
+        if ok is None:
+            # ★검증 수단이 없는 조합. '통과'로 처리하지 않고 그 사실을 남긴다.
+            self.get_logger().warning(f"재개 전 {held} 파지 재검증 불가 — {why}")
+            self.publish_event("RESUME_UNVERIFIED", run.goal.step_id, run.robot, "",
+                               f"{held} 파지 재검증 불가: {why}")
+            return
+        if not ok:
+            raise CellError("E201", f"재개 전 {held} 파지 재검증 실패: {why}")
+        self.get_logger().info(f"재개 전 {held} 파지 재검증 OK — {why} → {phase} 재시작")
 
     def _hold_mid_motion(self, gh, run, robot, pi):
         """★v0.3 C5: phase **중간**에서 PAUSE 로 멈춘 뒤의 HELD 대기.
@@ -717,6 +808,7 @@ class CellOrchestrator(Node):
                                     f"흡착 Pause 타임아웃 {suction_to:.0f}s 초과 (진공 피드백 없음)")
             time.sleep(0.1)
         self.hold_info = None
+        self._on_resume(run, pi.phase)
         return None
 
     def _boundary(self, gh, run, robot, next_phase=None):
@@ -760,6 +852,8 @@ class CellOrchestrator(Node):
                                         f"흡착 Pause 타임아웃 {suction_to:.0f}s 초과 (진공 피드백 없음)")
                 time.sleep(0.1)
             self.hold_info = None
+            # ★C8·C9: HELD 를 빠져나와 다시 돌기 직전. 재검증 실패면 CellError → FAULT.
+            self._on_resume(run, next_phase or run.phase)
         return None
 
     # ---------- 비전 요청·검증 (OBSERVE, v0.3 Final 확정판) ----------
