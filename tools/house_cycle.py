@@ -39,6 +39,7 @@ import house_geometry as HG
 import slot_target as STG        # 부품: pillars_px / base_pose_robot / load_map
 import base_twist as BT          # 부품: markers / board_frame_transform / apply_sim  (ArUco 고정 자)
 import base_depth_corner as BDC  # 부품: depth_mask / detect_rect (INNER_WALL_MODE = 내벽 전용 대응 스위치)
+import side_seat as SSEAT       # 부품: 측면캠(:8771) 안착 판정 — 고정캠이라 로봇 자세와 무관(red_s 용)
 
 STATE = os.environ.get("HOUSE_STATE", "/home/ar/bf2_console/state/house")
 os.makedirs(os.path.join(STATE, "logs"), exist_ok=True)
@@ -62,6 +63,7 @@ HOVER_Z = PC.HOVER_Z                            # 478
 COLORS = ("blue", "yellow", "red", "red_s", "red_in")   # ★9/7 red_in = 내벽(흰 바탕 빨간 점 3개, 새 랙)
 GRIP_OPEN = 30                                  # 사용자 설계: 벌림 30 으로 내려온다
 RACK_RZ_FOLLOW = False                          # 랙 위 벽 각을 rz 로 따라갈지(부호 미검증 → 기본 끔, 각은 보고만)
+HOVER_DZ = {"red_in": 102.0}   # 안착 z 위로 얼마에서 정렬하나(기본 85.0). red_in=338+102=440 = 기준을 찍은 높이
 RACK_ANG_MAX = 3.0                              # 랙 위 벽 각 변화 상한(넘으면 벽이 삐뚤게 놓인 것 → 정지)
 ARUCO_WARN_MM, ARUCO_WARN_DEG = 1.5, 0.3        # 고정 자 대비 카메라 복귀 오차 경고
 GRASP_GATE_MM, GRASP_GATE_DEG = PC.GRASP_GATE_MM, 0.7   # 1.0 / 0.7 — 9/6 14시: 파랑 파지 각 +0.43~0.54° 가 4회 연속이고 4회 모두 삽입 성공 → 정상 파지 범위. 0.3 은 서명 촬영 각 편차였음
@@ -457,6 +459,14 @@ def stage_rack(color, teach_rack=False):
             log(f"  (랙 관측 노출 {float(rr['expo']):.0f} 로 맞춤 — 기준 촬영과 같은 노출)")
         except Exception as ex:
             log(f"  (랙 노출 맞춤 실패: {ex})")
+    # ★9/8 측면캠 안착 판정용 '꽂기 전' 스냅샷. 지금 로봇은 랙에 있어 베이스 화면에 안 들어온다 = 깨끗한 한 장.
+    #   나중에 벽을 놓고 물러난 뒤 한 장 더 떠서, 새로 생긴 점 = 이 벽의 점으로 가른다.
+    try:
+        with LOCK: S["side_pre"] = SSEAT.snapshot()
+        log(f"  (측면캠 꽂기 전 스냅샷 {len(S['side_pre'])}점)")
+    except Exception as ex:
+        with LOCK: S["side_pre"] = None
+        log(f"  (측면캠 스냅샷 실패: {ex})")
     L0 = rr["len0_px"]; dxy = (0.0, 0.0); e = None
     for rnd in range(3):                                          # 14:42 실기: 벽이 프레임 아래끝(y707/720)까지 밀려 끝점 잘림 → 길이 −16% 정지 → 카메라를 옮겨 재관측
         cur = PC.st()["tcp"]; dxy = (cur[0] - rp[0], cur[1] - rp[1])
@@ -594,7 +604,11 @@ def stage_carry_hover(color, T):
     move([T["x"], T["y"], SAFE_Z] + rot, tag="목표 위 SAFE(rz 정렬)")
     log(f"  (참고) 운반 후 그리퍼 {PC.grip_read()}")
     PC.speed(SPD_DESC); move([T["x"], T["y"], HOVER_Z] + rot, tag="호버 z478")
-    zh = T["z_seat"] + 85.0
+    # ★9/8: 정렬 기준은 다섯 색 모두 z440 에서 찍혔는데 운반 높이는 '안착+85' 로 계산한다.
+    #   외벽은 안착이 351~355 라 436~440 이 나와 허용 ±3mm 에 우연히 들어갔지만, 내벽은 안착 338 →
+    #   423 으로 17mm 어긋나 "높이 z423 ≠ 기준 z440" 로 정렬이 아예 못 돌았다.
+    #   색별 높이차를 둔다. 외벽 4색은 .get 이 85.0 을 돌려주므로 예전 값 그대로다.
+    zh = T["z_seat"] + HOVER_DZ.get(color, 85.0)
     PC.speed(SPD_SEAT); move([T["x"], T["y"], zh] + rot, tag=f"기둥 위 z{zh:.0f}")
     set_stage("2' HOVER ALIGN", color=color)
     if HA.load_ref(color) is None:
@@ -660,8 +674,11 @@ def descend_gate(color):
     if age > ALIGN_MAX_AGE_S:
         raise Gate(f"정렬 후 {age/60:.0f}분 경과(> {ALIGN_MAX_AGE_S//60}분) — 베이스가 움직였을 수 있음, 사이클 다시(재정렬)")
     cur = PC.st()["tcp"]
-    if not (T["z_seat"] - 1.0 <= cur[2] <= T["z_seat"] + 88.0):        # 막힘 후퇴 뒤 재하강·안착 높이(사용자 조그) 허용: z_seat−1 ~ +88
-        raise Gate(f"지금 z{cur[2]:.0f} 가 z{T['z_seat']+3:.0f}~{T['z_seat']+88:.0f} 밖 — 정렬 후 움직였음, 사이클 다시")
+    # ★9/8: 상한은 '정렬 높이 + 여유 3mm' 다. 정렬 높이가 색마다 다르므로(HOVER_DZ) 그걸 따라간다.
+    #   외벽 4색은 HOVER_DZ 기본 85.0 → 상한 88 로 예전과 동일. 내벽만 102+3=105 가 된다.
+    z_hi = T["z_seat"] + HOVER_DZ.get(color, 85.0) + 3.0
+    if not (T["z_seat"] - 1.0 <= cur[2] <= z_hi):        # 막힘 후퇴 뒤 재하강·안착 높이(사용자 조그) 허용
+        raise Gate(f"지금 z{cur[2]:.0f} 가 z{T['z_seat']-1:.0f}~{z_hi:.0f} 밖 — 정렬 후 움직였음, 사이클 다시")
     dxy = math.hypot(cur[0] - A["x"], cur[1] - A["y"]); drz = abs(HG.wrap_deg(cur[5] - A["rz"]))
     if dxy > ALIGN_GATE_MM or drz > ALIGN_GATE_DEG:
         # 14:33 실기: 랙 비틀림(죠 안 +0.99°)을 새카메라 1점 정렬이 못 봐서 사용자가 2.35mm/0.32° 조그 → 설계대로 사용자 판단이 최종.
@@ -781,6 +798,32 @@ def promote_slot_ref(color, seat_tcp, B, note="자동 승격: 안착 성공 TCP 
     return True
 
 
+def side_seat_after(color):
+    """★9/8 신설: 벽을 놓고 로봇이 SAFE 로 물러난 뒤 측면캠으로 확인한다.
+    측면캠은 고정이라 로봇 자세와 무관하고 벽 자체를 직접 본다 — 안착 높이에서 기둥을 못 보는
+    red_s·red_in 도 판정할 수 있다. **덧붙이는 검사라 실패해도 사이클에 영향을 주지 않는다**(로그만).
+    기준이 없으면 이번 자리로 학습하고, 있으면 판정한다."""
+    with LOCK:
+        pre = S.get("side_pre")
+    try:
+        have = bool((json.load(open(SSEAT.REF)) if os.path.exists(SSEAT.REF) else {}).get(color))
+    except Exception:
+        have = False
+    try:
+        if not have:
+            if not pre:
+                log("  (측면캠 기준 학습 생략: 꽂기 전 스냅샷 없음)"); return
+            r = SSEAT.save_ref(color, pre)
+            log(f"  ✅ 측면캠 안착 기준 학습 [{color}]: 벽 점 {r['wall']}개 {r['wall_px']} · 기준점 {r['anchors']}개")
+        else:
+            v = SSEAT.verify(color)
+            with LOCK: S["side_seat"] = v
+            mark = "✅" if v.get("state") == "seated_side" else ("🛑" if v.get("state") == "not_seated" else "  ")
+            log(f"  {mark} 측면캠 판정 [{color}]: {v.get('state')} — {v.get('why')}")
+    except Exception as ex:
+        log(f"  (측면캠 판정 건너뜀: {ex})")
+
+
 def release_and_rise(color, rr):
     set_stage("3 RELEASE", color=color)
     log(f"  그리퍼 열기 → {PC.gripper(rr.get('grip_open', GRIP_OPEN))}")
@@ -788,6 +831,7 @@ def release_and_rise(color, rr):
     PC.speed(SPD_SEAT); move([cur[0], cur[1], cur[2] + 30] + list(cur[3:]), tag="수직 +30")
     PC.speed(SPD_DESC); move([cur[0], cur[1], HOVER_Z] + list(cur[3:]), tag="호버 z478")
     PC.speed(SPD_MOVE); move([cur[0], cur[1], SAFE_Z] + list(cur[3:]), tag="SAFE"); PC.speed(1)
+    side_seat_after(color)
 
 
 def stage_descend(color):
@@ -1244,7 +1288,7 @@ pre{background:#000;padding:8px;height:260px;overflow:auto;font-size:12px}table{
 .card{display:inline-block;vertical-align:top;background:#1c1c1c;padding:8px;margin:4px;border-radius:6px;min-width:260px}</style>
 <h2>HOUSE CYCLE <small id=tcp></small></h2>
 <div class=st>단계: <b id=stage>-</b> <span id=wait class=wait></span></div>
-<div>색: <select id=color onchange="try{localStorage.setItem('hc_color',this.value)}catch(e){}"><option>blue<option>yellow<option>red<option>red_s</select>
+<div>색: <select id=color onchange="try{localStorage.setItem('hc_color',this.value)}catch(e){}"><option>blue<option>yellow<option>red<option>red_s<option>red_in</select>
  <button class=big onclick="cmd('start')">▶ 사이클(1→2→2')</button>
  <button onclick="cmd('start',{teach:1})">▶ 사이클 + 랙 파지 티칭</button>
  <button onclick="cmd('resume_held')">▶ 든 채로 3단계부터(운반→z440 정렬→하강 대기)</button>
