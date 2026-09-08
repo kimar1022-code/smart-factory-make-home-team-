@@ -63,6 +63,10 @@ HOVER_Z = PC.HOVER_Z                            # 478
 COLORS = ("blue", "yellow", "red", "red_s", "red_in")   # ★9/7 red_in = 내벽(흰 바탕 빨간 점 3개, 새 랙)
 GRIP_OPEN = 30                                  # 사용자 설계: 벌림 30 으로 내려온다
 RACK_RZ_FOLLOW = False                          # 랙 위 벽 각을 rz 로 따라갈지(부호 미검증 → 기본 끔, 각은 보고만)
+# ★9/8 책상이 2mm 올라간 상태. 안착 z 를 바꾸면 정렬 높이(안착+HOVER_DZ)까지 따라 움직여
+#   z440 기준과 어긋나 정렬이 아예 못 돈다 → **하강 정지 높이만** 따로 둔다.
+#   None 이면 평소대로 슬롯 기준의 안착 z 까지 내려간다. 값을 주면 그 높이에서 멈춘다(더 깊이 안 감).
+DESCEND_STOP_Z = None      # 9/8 14:3x 사용자 확정 안착 z(블루 356) 반영 → 정지 높이 해제
 HOVER_DZ = {"red_in": 102.0}   # 안착 z 위로 얼마에서 정렬하나(기본 85.0). red_in=338+102=440 = 기준을 찍은 높이
 RACK_ANG_MAX = 3.0                              # 랙 위 벽 각 변화 상한(넘으면 벽이 삐뚤게 놓인 것 → 정지)
 ARUCO_WARN_MM, ARUCO_WARN_DEG = 1.5, 0.3        # 고정 자 대비 카메라 복귀 오차 경고
@@ -655,8 +659,12 @@ def descend_gate(color):
     if not (A and A.get("done")):
         # 13:3x 실기: 카메라 불일치로 정렬이 안 돈 상태에서 사용자가 육안으로 맞춤 → 설계 3단계(사용자 허락 후 버튼 하강) 그대로,
         # 지금 TCP 를 '사용자 정렬 완료' 로 간주. 단 z 는 z_seat+85 ±3 이어야.
-        if not (T["z_seat"] - 1.0 <= cur0[2] <= T["z_seat"] + 88.0):
-            raise Gate(f"정렬 상태 없음 + 지금 z{cur0[2]:.0f} 가 z{T['z_seat']+3:.0f}~{T['z_seat']+88:.0f} 밖 — 수동 정렬이면 z440(또는 채널 안)에서 누르세요")
+        # ★9/8: 이 경로(정렬 상태 없이 수동 하강)의 높이 창도 색별 정렬 높이(HOVER_DZ)를 따라가야 한다.
+        #   내벽은 안착 340.5 + 102 = 442.5 에서 정렬하는데 상한이 '안착+88'(=428.5) 이라 창 밖이 됐다.
+        #   외벽 4색은 HOVER_DZ 기본 85 → 상한 88 로 예전과 동일.
+        _zhi = T["z_seat"] + HOVER_DZ.get(color, 85.0) + 3.0
+        if not (T["z_seat"] - 1.0 <= cur0[2] <= _zhi):
+            raise Gate(f"정렬 상태 없음 + 지금 z{cur0[2]:.0f} 가 z{T['z_seat']-1:.0f}~{_zhi:.0f} 밖 — 수동 정렬이면 정렬 높이(또는 채널 안)에서 누르세요")
         A = {"done": True, "by": "user", "x": cur0[0], "y": cur0[1], "z": cur0[2], "rz": cur0[5], "made_t": time.time(), "made": time.strftime("%H:%M:%S")}
         with LOCK: S["align"] = A
         log(f"  정렬 상태 없음 → 사용자 수동 정렬 TCP ({cur0[0]:.2f},{cur0[1]:.2f}) rz{cur0[5]:+.2f} 를 정렬 완료로 간주")
@@ -840,7 +848,11 @@ def stage_descend(color):
     T, A, cur = descend_gate(color)
     set_stage("3 DESCEND", color=color)
     rr = (jload(F["rack"]) or {}).get(color) or {}
-    PC.descend_monitored(color, cur[0], cur[1], [180.0, 0.0, cur[5]], T["z_seat"], rr.get("grip_close", 13))   # 부품(3mm 단계·벽점 밀림·놓침·정체 → stop+25mm)
+    z_tgt = T["z_seat"]
+    if DESCEND_STOP_Z is not None and DESCEND_STOP_Z > z_tgt:
+        log(f"  ⚠ 하강 정지 높이 z{DESCEND_STOP_Z:.0f} 적용 — 안착 z{z_tgt:.0f} 까지 내려가지 않는다(사용자 확인용)")
+        z_tgt = DESCEND_STOP_Z
+    PC.descend_monitored(color, cur[0], cur[1], [180.0, 0.0, cur[5]], z_tgt, rr.get("grip_close", 13))   # 부품(3mm 단계·벽점 밀림·놓침·정체 → stop+25mm)
     set_stage("3 SEAT CHECK", color=color)
     seat = seat_check(color)
     seated = str(seat.get("state", "")).startswith("seated")
@@ -1270,42 +1282,56 @@ def snapshot():
 
 PAGE = r"""<!doctype html><meta charset=utf-8><title>HOUSE CYCLE</title>
 <meta name=viewport content="width=device-width,initial-scale=1">
-<style>body{font:14px system-ui;margin:12px;background:#111;color:#eee}button{margin:2px;padding:6px 10px;font-size:14px}
-.big{font-size:18px;padding:10px 16px}.st{font-size:22px;margin:6px 0}.ok{color:#5f5}.no{color:#f66}.wait{color:#fc3}
+<style>/* ★9/8: 로그(pre)만 키움 — 나머지는 원래 크기 */
+body{font:16px system-ui;margin:12px;background:#111;color:#eee}button{margin:2px;padding:7px 12px;font-size:16px}
+.big{font-size:20px;padding:11px 18px}.st{font-size:24px;margin:6px 0}.ok{color:#5f5}.no{color:#f66}.wait{color:#fc3}
+select,input{font-size:16px;padding:4px}
+/* ★9/8: 색 선택은 크게, 버튼은 기능별로 색을 나눠 구분 */
+#color{font-size:26px;font-weight:800;padding:8px 14px;background:#222;color:#fff;
+       border:3px solid #6cf;border-radius:8px;min-width:180px}
+button{border:0;border-radius:6px;color:#fff;background:#3a3f47;cursor:pointer}
+button:hover{filter:brightness(1.25)}
+.run {background:#1565c0}          /* 파랑 = 사이클 실행 */
+.down{background:#e67e00}          /* 주황 = 하강(로봇이 벽을 밀어 넣음) */
+.stop{background:#b00020}          /* 빨강 = 중단 */
+.go  {background:#2e7d32}          /* 초록 = 계속 */
+.move{background:#455a64}          /* 회색 = 단순 이동 */
+.teach{background:#6a1b9a}         /* 보라 = 기준 저장(티칭) */
+.probe{background:#00695c}         /* 청록 = 캠 매핑 */
 /* ★9/7 밤: 노트북·휴대폰에서 조작하려고 좁은 화면 대응 추가(표시만 바뀜, 동작 로직은 그대로).
    손가락으로 누르는 화면이라 버튼을 키우고, 로그·표는 가로로 넘치지 않게 각자 스크롤시킨다. */
 @media (max-width:820px){
-  body{margin:8px;font-size:16px}
-  button{font-size:17px;padding:11px 14px;margin:3px 2px}
-  .big{font-size:19px;padding:14px 18px;width:100%;box-sizing:border-box}
-  .st{font-size:20px}
-  select,input{font-size:17px;padding:8px}
-  pre{height:180px;font-size:12px}
+  body{margin:8px;font-size:18px}
+  button{font-size:19px;padding:12px 16px;margin:3px 2px}
+  .big{font-size:21px;padding:15px 20px;width:100%;box-sizing:border-box}
+  .st{font-size:22px}
+  select,input{font-size:19px;padding:9px}
+  pre{height:260px;font-size:22px}
   table{display:block;overflow-x:auto;white-space:nowrap;max-width:100%}
   img{max-width:100%;height:auto}
 }
-pre{background:#000;padding:8px;height:260px;overflow:auto;font-size:12px}table{border-collapse:collapse}td,th{border:1px solid #444;padding:2px 8px}
+pre{background:#000;padding:8px;height:340px;overflow:auto;font-size:24px;line-height:1.35}table{border-collapse:collapse}td,th{border:1px solid #444;padding:2px 8px}
 .card{display:inline-block;vertical-align:top;background:#1c1c1c;padding:8px;margin:4px;border-radius:6px;min-width:260px}</style>
 <h2>HOUSE CYCLE <small id=tcp></small></h2>
 <div class=st>단계: <b id=stage>-</b> <span id=wait class=wait></span></div>
 <div>색: <select id=color onchange="try{localStorage.setItem('hc_color',this.value)}catch(e){}"><option>blue<option>yellow<option>red<option>red_s<option>red_in</select>
- <button class=big onclick="cmd('start')">▶ 사이클(1→2→2')</button>
- <button onclick="cmd('start',{teach:1})">▶ 사이클 + 랙 파지 티칭</button>
- <button onclick="cmd('resume_held')">▶ 든 채로 3단계부터(운반→z440 정렬→하강 대기)</button>
- <button onclick="cmd('align_here')">▶ 여기서 정렬만 다시(z440, 든 채)</button>
- <button class=big onclick="if(confirm('4벽 연속 blue→yellow→red→red_s? 벽마다 빈손 베이스 재측정, 하강은 매번 [⬇ 하강] 버튼'))cmd('run4')">▶ 4벽 연속(run4)</button>
- <button class=big id=desc onclick="if(confirm('수직 하강? x·y·yaw 확인했나'))cmd('descend')">⬇ 하강(3)</button>
- <button onclick="if(confirm('하강 → 안착 성공 시 든 채로 z440 올려 기준 재촬영 → 재하강·놓기?'))cmd('descend_reteach')">⬇ 하강+성공 시 z440 기준 재촬영</button>
- <button class=big style="background:#a00;color:#fff" onclick="cmd('abort')">⛔ 중단</button>
- <button onclick="cmd('resume')">▶ 계속</button>
- <button onclick="cmd('goto_obs')">관측자세로</button></div>
+ <button class="big run" onclick="cmd('start')">▶ 사이클(1→2→2')</button>
+ <button class="run" onclick="cmd('start',{teach:1})">▶ 사이클 + 랙 파지 티칭</button>
+ <button class="run" onclick="cmd('resume_held')">▶ 든 채로 3단계부터(운반→z440 정렬→하강 대기)</button>
+ <button class="run" onclick="cmd('align_here')">▶ 여기서 정렬만 다시(z440, 든 채)</button>
+ <button class="big run" onclick="if(confirm('4벽 연속 blue→yellow→red→red_s? 벽마다 빈손 베이스 재측정, 하강은 매번 [⬇ 하강] 버튼'))cmd('run4')">▶ 4벽 연속(run4)</button>
+ <button class="big down" id=desc onclick="if(confirm('수직 하강? x·y·yaw 확인했나'))cmd('descend')">⬇ 하강(3)</button>
+ <button class="down" onclick="if(confirm('하강 → 안착 성공 시 든 채로 z440 올려 기준 재촬영 → 재하강·놓기?'))cmd('descend_reteach')">⬇ 하강+성공 시 z440 기준 재촬영</button>
+ <button class="big stop" onclick="cmd('abort')">⛔ 중단</button>
+ <button class="go" onclick="cmd('resume')">▶ 계속</button>
+ <button class="move" onclick="cmd('goto_obs')">관측자세로</button></div>
 <div class=card><b>티칭(선택한 색)</b><br>
- <button onclick="cmd('slot_both')">슬롯 기준 1/2+2/2 한 버튼 (물고 저장 → 놓고 ▶계속 → 측정)</button><br>
- <button onclick="cmd('slot1')">슬롯 기준 1/2 (안착 TCP)</button> <button onclick="cmd('slot2')">슬롯 기준 2/2 (관측 페어링)</button><br>
- <button onclick="cmd('rack_offset')">랙 보정 저장</button> <button onclick="cmd('sig')">좋은 파지 서명 저장</button><br>
- <button onclick="cmd('hover_ref',{src:'wrist'})">z440 기준 저장(손목)</button>
- <button onclick="cmd('hover_ref',{src:'newcam'})">(새카메라)</button> <button onclick="cmd('hover_ref',{src:'side'})">(측면)</button><br>
- <button onclick="cmd('probe',{src:'newcam'})">고정캠 매핑: 새카메라</button> <button onclick="cmd('probe',{src:'side'})">측면캠</button></div>
+ <button class="teach" onclick="cmd('slot_both')">슬롯 기준 1/2+2/2 한 버튼 (물고 저장 → 놓고 ▶계속 → 측정)</button><br>
+ <button class="teach" onclick="cmd('slot1')">슬롯 기준 1/2 (안착 TCP)</button> <button class="teach" onclick="cmd('slot2')">슬롯 기준 2/2 (관측 페어링)</button><br>
+ <button class="teach" onclick="cmd('rack_offset')">랙 보정 저장</button> <button class="teach" onclick="cmd('sig')">좋은 파지 서명 저장</button><br>
+ <button class="teach" onclick="cmd('hover_ref',{src:'wrist'})">z440 기준 저장(손목)</button>
+ <button class="teach" onclick="cmd('hover_ref',{src:'newcam'})">(새카메라)</button> <button class="teach" onclick="cmd('hover_ref',{src:'side'})">(측면)</button><br>
+ <button class="probe" onclick="cmd('probe',{src:'newcam'})">고정캠 매핑: 새카메라</button> <button class="probe" onclick="cmd('probe',{src:'side'})">측면캠</button></div>
 <div class=card><b>게이트</b><div id=gates></div></div>
 <div class=card><b>기준 보유</b><div id=refs></div></div>
 <div class=card><b>수치</b><div id=nums></div></div>
