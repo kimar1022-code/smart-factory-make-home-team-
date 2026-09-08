@@ -185,11 +185,54 @@ RESUME 전 Vision 재검증 → 이상 시 `FAULT` — 동의하며 V8 로 검�
 | 흡착 타임아웃 | `suction_hold_timeout_sec` 파라미터, 기본 60초(임시) |
 | 하위 호환 | `immediate` 미지정 = v0.2 동작 |
 
-### 진행 상태
+### 진행 상태 (2026-09-09 오전 갱신)
 
-- `CellControl.srv` **v0.3 개정 완료** (저장소 반영).
-- `/cell/status` 의 `hold` 블록, `stop_mode`/`eta_ms` 산출, PAUSE 태그 골 취소는 **구현 예정**입니다.
-- 순서: 구현 → **도메인 99 격리 모의**(V1~V9) → 실기. 실기 스택과 같은 도메인에서는 시험하지 않습니다(8/11 사고 이후 철칙).
+**ACK / status 의미 부분은 구현·검증 완료**입니다. 도메인 99 격리 sim 으로 확인했습니다.
+
+| | 항목 | 상태 |
+|---|---|---|
+| ✅ | `CellControl.srv` v0.3 (`immediate` / `stop_mode` / `eta_ms`) | 개정·빌드 완료 |
+| ✅ | `srv_control` 이 `immediate` 를 읽고 `stop_mode`·`eta_ms` 응답 | 검증됨 |
+| ✅ | `/cell/status` 의 `hold` 블록 (`held_at`·`phase`·`since`·`resumable`) | 검증됨 |
+| ✅ | 흡착 Pause 타임아웃 `suction_hold_timeout_sec` | 검증됨(3초로 낮춰 FAULT 확인) |
+| ✅ | 하위 호환 (`immediate` 없는 v0.2 호출) | 검증됨 |
+| ⬜ | phase **중간** 즉시정지 | 미구현 |
+| ⬜ | 정지 사유 태그 `PAUSE`/`ABORT`/`ERROR` | 미구현 |
+| ⬜ | RESUME 전 Vision 재검증 | 미구현 |
+
+**즉시정지가 아직 없다는 사실을 숨기지 않습니다.** `immediate_pause_enabled` 파라미터가 `false` 인 동안
+`immediate=true` 요청에도 ACK 는 `stop_mode="AT_PHASE_BOUNDARY"` 로 **사실대로** 나가고,
+`detail` 에 `"immediate 요청 — 즉시정지 경로 미구현, v0.3 C5"` 가 붙습니다.
+서버 쪽에서 `stop_mode` 만 보고 UX 를 분기하시면, 저희가 즉시정지를 켜는 순간 자동으로 맞아 들어갑니다.
+
+#### 실측 로그 (도메인 99, exec_mode=sim)
+
+```
+PAUSE(immediate=true) → accepted=True  stop_mode='AT_PHASE_BOUNDARY'  eta_ms='8000'
+                        detail='현재 안전 단위 완료 후 HELD 진입 (immediate 요청 — 즉시정지 경로 미구현, v0.3 C5)'
+
+/cell/status  cell_state=HELD
+  hold  {"req_id":"job-v03-2","stop_mode":"AT_PHASE_BOUNDARY","held_at":"PHASE_BOUNDARY",
+         "phase":"PLACE_APPROACH","since":"…","resumable":true}
+  active_task  req_id=job-v03-2  ← ExecuteTask 살아 있음(V2)
+
+RESUME → cell_state=EXECUTE, hold=null, 같은 골 유지 → 최종 SUCCEEDED
+
+흡착 타임아웃(3s 로 낮춤) → cell_state=FAULT, status=FAILED, error_code=E201
+```
+
+> `hold.phase` 는 **"재개하면 그때부터 도는 phase"** 입니다.
+> `active_task.phase`(직전에 끝난 phase)와 다릅니다 — 두 값이 다르게 보이는 것이 정상입니다.
+
+#### 남은 순서
+
+**C6(정지 사유 태그) → C5(즉시정지)** 순서로 갑니다. 반대로 하면 서버팀이 지적하신 V2 가 깨집니다.
+
+한 가지 정확히 말씀드립니다 — **V2 는 지금은 자동으로 통과합니다.** 현재 PAUSE 는 MoveGroup 골을
+취소하지 않고 phase 경계까지 기다리기만 하기 때문입니다. **그 위험은 C5 를 구현하는 순간 생깁니다.**
+검증 시점을 그때로 잡아 주시면 됩니다.
+
+이후 도메인 99 격리 모의(V1~V9) → 실기 순입니다. 실기 스택과 같은 도메인에서는 시험하지 않습니다(8/11 사고 이후 철칙).
 
 ### 저희가 확인 부탁드리는 것 하나
 
