@@ -1050,14 +1050,24 @@ def run_held(color):
     set_stage("WAIT DESCEND", wait="[⬇ 하강] 버튼 (x·y·yaw 확인 후)", color=color)
 
 
-def align_here(color):
-    """든 채 z440 근처(±12)에서 정렬만 다시(SAFE 왕복 없음): z_seat+85 로 수직 이동 → ALIGN_SRCS 카메라로 정렬 → WAIT DESCEND."""
+def align_here(color, from_below=False):
+    """든 채 정렬 자세(z_seat+HOVER_DZ)로 수직 이동 → 카메라 정렬 → WAIT DESCEND. SAFE 왕복 없음.
+
+    from_below=True (일시정지 재개): 하강 중간에 멈춘 자리에서도 **정렬 높이까지 되올라가** 다시 측정한다.
+      ★9/9 사용자 지시(서버 Pause/Resume 시나리오): "정지시켰다 재개하면 **다시 한번 위에서 측정하고**
+      내려오는 걸로 가자 — 벽이 들려 있을 경우". 멈춘 사이 베이스나 파지가 조금이라도 달라졌을 수 있는데,
+      그 자리에서 이어 내려가면 그 변화를 못 본 채로 밀어 넣게 된다. 우리 phase 는 전부 절대 목표라
+      되올라가 다시 재는 쪽이 안전하고 결과도 같다(계약 v0.3 §4 'phase 재시작' 과 같은 원칙)."""
     ref = (jload(F["slot"]) or {}).get(color)
     if not ref:
         raise Gate(f"{color} 슬롯 기준 없음")
-    zs = ref["seat_tcp"][2]; zh = zs + 85.0
+    zs = ref["seat_tcp"][2]; zh = zs + HOVER_DZ.get(color, 85.0)
     cur = PC.st()["tcp"]
-    if abs(cur[2] - zh) > 12.0:
+    if from_below:
+        if cur[2] > zh + 12.0:
+            raise Gate(f"지금 z{cur[2]:.0f} 가 정렬 높이 z{zh:.0f} 보다 높다 — 재개 대상이 아니다")
+        log(f"  일시정지 재개: z{cur[2]:.0f} → 정렬 높이 z{zh:.0f} 로 수직 복귀 후 재측정")
+    elif abs(cur[2] - zh) > 12.0:
         raise Gate(f"지금 z{cur[2]:.0f} — z{zh:.0f}±12 에서만(든 채)")
     g = PC.grip_read(); rr = (jload(F["rack"]) or {}).get(color) or {}
     if g.isdigit() and int(g) <= rr.get("grip_close", 13):
@@ -1069,7 +1079,7 @@ def align_here(color):
         S.update(color=color, err=None, align=None, seat=None)
         if not S.get("target"):
             S["target"] = {"x": None, "y": None, "rz": None, "z_seat": zs, "user_fallback": True}
-    set_stage("2' HOVER ALIGN(재)", color=color)
+    set_stage("2' HOVER ALIGN(재개)" if from_below else "2' HOVER ALIGN(재)", color=color)
     PC.speed(SPD_SEAT); move([cur[0], cur[1], zh] + list(cur[3:]), tag=f"z{zh:.0f}")
     A = {"done": False}
     with LOCK: S["align"] = A
@@ -1245,6 +1255,7 @@ def worker():
             ABORT.clear()
             if op == "start": run_cycle(arg["color"], arg.get("teach_rack", False))
             elif op == "resume_held": run_held(arg["color"])
+            elif op == "resume_pause": align_here(arg["color"], from_below=True)
             elif op == "align_here": align_here(arg["color"])
             elif op == "descend": stage_descend(arg["color"])
             elif op == "descend_reteach": stage_descend_reteach(arg["color"])
@@ -1286,7 +1297,7 @@ def handle_cmd(q):
         r4 = S.get("run4"); in_run4_wait = bool(r4 and r4.get("active") and S.get("stage") == "WAIT DESCEND" and S.get("wait"))
     if op == "descend" and in_run4_wait:                             # ④run4 는 워커가 점유 중 → 하강 버튼 = 계속
         RESUME.set(); return {"ok": True, "note": "run4: 하강 진행"}
-    if op in ("start", "descend", "goto_obs", "slot2", "probe", "run4", "slot_both", "resume_held", "descend_reteach", "align_here"):
+    if op in ("start", "descend", "goto_obs", "slot2", "probe", "run4", "slot_both", "resume_held", "resume_pause", "descend_reteach", "align_here"):
         if S["busy"]:
             return {"ok": False, "err": "실행 중 — 먼저 중단"}
         order = [c for c in (q.get("order", [""])[0] or "").split(",") if c] or list(RUN4_ORDER)
@@ -1361,6 +1372,7 @@ pre{background:#000;padding:8px;height:340px;overflow:auto;font-size:24px;line-h
  <button class="big run" onclick="cmd('start')">▶ 사이클(1→2→2')</button>
  <button class="run" onclick="cmd('start',{teach:1})">▶ 사이클 + 랙 파지 티칭</button>
  <button class="run" onclick="cmd('resume_held')">▶ 든 채로 3단계부터(운반→z440 정렬→하강 대기)</button>
+ <button class="run" onclick="cmd('resume_pause')">⏯ 일시정지 재개(든 채 정렬높이 복귀→재측정→하강 대기)</button>
  <button class="run" onclick="cmd('align_here')">▶ 여기서 정렬만 다시(z440, 든 채)</button>
  <button class="big run" onclick="if(confirm('4벽 연속 blue→yellow→red→red_s? 벽마다 빈손 베이스 재측정, 하강은 매번 [⬇ 하강] 버튼'))cmd('run4')">▶ 4벽 연속(run4)</button>
  <button class="big down" id=desc onclick="if(confirm('수직 하강? x·y·yaw 확인했나'))cmd('descend')">⬇ 하강(3)</button>
