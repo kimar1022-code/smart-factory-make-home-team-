@@ -114,9 +114,25 @@ DESCEND_STOP_Z = None      # 9/8 14:3x 사용자 확정 안착 z(블루 356) 반
 #   하강 버튼을 누른 것 자체가 사람의 확인이다. 목표 z 까지 **막힘 없이** 내려갔으면 완료로 보고 그대로 개방·상승한다.
 #   단 카메라가 적극적으로 "잘못 앉았다(not_seated)"고 판정하면 그건 그대로 멈춘다 — unknown(판정 불가)만 통과.
 #   기준 승격은 하지 않는다(카메라로 확인된 게 아니므로 오늘 잡은 기준을 덮어쓰지 않는다).
-# ★9/9 밤 A타입 티칭 중에는 False — 안착 판정 불가여도 그리퍼를 유지하고 그 자리에 서야
-#   그 자세에서 [슬롯 기준 1/2] 를 찍을 수 있다. A 기준이 다 잡히면 True 로 되돌릴 것.
-SEAT_UNKNOWN_AUTO = False
+# ★안착 판정 불가(unknown)를 자동 완료로 넘길지 — 재기동 없이 바꾸도록 파일에 둔다(9/9).
+#   True(본선): 목표 z 까지 막힘 없이 갔으면 그대로 개방·상승. 벽마다 [계속] 을 누를 필요가 없다.
+#   False(티칭): 그리퍼를 문 채 SEAT FAIL 로 선다 — 그 자세에서만 [슬롯 기준 1/2] 을 찍을 수 있다.
+#   not_seated(카메라가 적극적으로 잘못 앉았다고 함)는 어느 쪽이든 정지. 기준 승격도 하지 않는다.
+SEAT_AUTO_F = os.path.join(STATE, "seat_auto.json")
+
+
+def seat_unknown_auto():
+    try:
+        return bool(json.load(open(SEAT_AUTO_F)).get("auto", True))
+    except Exception:
+        return True                      # 파일이 없으면 본선 동작(True)
+
+
+def set_seat_auto(v):
+    on = str(v).lower() in ("1", "true", "on", "y", "yes")
+    jsave(SEAT_AUTO_F, {"auto": on, "made": time.strftime("%Y-%m-%d %H:%M")})
+    log(f"══ 안착 판정 불가 자동완료: {'ON(본선 — [계속] 불필요)' if on else 'OFF(티칭 — 벽 문 채 정지)'}")
+    return on
 HOVER_DZ = {"red_in": 102.0}   # 안착 z 위로 얼마에서 정렬하나(기본 85.0). red_in=338+102=440 = 기준을 찍은 높이
 RACK_ANG_MAX = 3.0                              # 랙 위 벽 각 변화 상한(넘으면 벽이 삐뚤게 놓인 것 → 정지)
 ARUCO_WARN_MM, ARUCO_WARN_DEG = 1.5, 0.3        # 고정 자 대비 카메라 복귀 오차 경고
@@ -937,7 +953,7 @@ def stage_descend(color):
     auto_done = False                    # ★unknown 을 자동 완료로 넘겼는가(= run4 를 계속 이어가도 되는가)
     if not seated:
         _unknown = str(seat.get("state", "")) == "unknown"
-        if SEAT_UNKNOWN_AUTO and _unknown:
+        if seat_unknown_auto() and _unknown:
             auto_done = True
             # 하강 버튼 = 사람의 확인. 막힘 없이 목표 z 까지 갔으므로 멈추지 않고 개방·상승한다(기준 승격 없음).
             log(f"  안착 판정 불가(unknown) — 목표 z 까지 막힘 없이 도달 → 완료로 보고 개방·상승 (기준 승격 없음)")
@@ -1371,6 +1387,7 @@ def handle_cmd(q):
         Q.put((op, {"color": color, "src": src, "order": order, "teach_rack": q.get("teach", ["0"])[0] == "1"})); return {"ok": True}
     try:                                                            # 로봇 이동 없는 즉시 명령
         if op == "house": return {"ok": True, "house_type": switch_house(q.get("type", [""])[0])}
+        if op == "seat_auto": return {"ok": True, "seat_auto": set_seat_auto(q.get("on", ["1"])[0])}
         if op == "slot1": teach_slot_tcp(color)
         elif op == "rack_offset": teach_rack_offset(color)
         elif op == "sig": teach_grasp_sig(color)
@@ -1386,6 +1403,7 @@ def snapshot():
     with LOCK:
         d = dict(S)
     d["house_type"] = house_type()
+    d["seat_auto"] = seat_unknown_auto()
     d["state_dir"] = os.path.realpath(STATE)
     try:
         s = PC.st(); d["tcp"] = [round(v, 2) for v in s["tcp"]]; d["grip"] = s.get("gripper"); d["frozen"] = s.get("frozen")
@@ -1462,6 +1480,11 @@ pre{background:#000;padding:8px;height:340px;overflow:auto;font-size:24px;line-h
  <button class="teach" onclick="if(confirm('집 타입을 B(기존 5벽)로 바꿀까요? 기준 세트가 통째로 바뀝니다'))cmd('house',{type:'b'})">B타입으로</button>
  <button class="teach" onclick="if(confirm('집 타입을 A로 바꿀까요? 기준 세트가 통째로 바뀝니다 — A타입 기준은 아직 비어 있습니다'))cmd('house',{type:'a'})">A타입으로</button>
  <div style="font-size:14px;color:#a33;margin-top:4px">티칭 저장은 <b>지금 선택된 타입</b>의 기준에 들어갑니다. 저장 전에 위 배지를 확인하세요.</div></div>
+<div class=card><b>안착 판정 불가 처리</b>
+ <span id=sauto style="font-size:22px;font-weight:bold;padding:2px 10px;border-radius:6px;background:#555;color:#fff">-</span><br>
+ <button class="run" onclick="cmd('seat_auto',{on:'1'})">자동완료 ON (본선)</button>
+ <button class="teach" onclick="cmd('seat_auto',{on:'0'})">OFF (티칭: 벽 문 채 정지)</button>
+ <div style="font-size:14px;color:#666;margin-top:4px">ON = 목표 z 도달 시 [계속] 없이 개방·상승. 슬롯 기준 1/2 을 찍으려면 OFF.</div></div>
 <div class=card><b>게이트</b><div id=gates></div></div>
 <div class=card><b>기준 보유</b><div id=refs></div></div>
 <div class=card><b>수치</b><div id=nums></div></div>
@@ -1473,6 +1496,7 @@ function f(o){return o?JSON.stringify(o,(k,v)=>typeof v==='number'?+v.toFixed(2)
 try{const _c=localStorage.getItem('hc_color'); if(_c) $('color').value=_c;}catch(e){}   /* 9/7: 서버 재시작마다 색이 blue 로 리셋돼 엉뚱한 색으로 동작하는 사고가 반복 — 마지막 선택을 기억 */
 async function poll(){try{const s=await fetch('/state').then(r=>r.json());
  $('stage').textContent=s.stage+(s.err?'  ✖ '+s.err:'')+(s.run4?`  [run4 ${s.run4.idx+1}/${s.run4.order.length} ${s.run4.order[s.run4.idx]} 완료:${s.run4.done.join(',')||'-'}${s.run4.active?'':' 종료'}]`:'');
+ $('sauto').textContent=s.seat_auto?'ON':'OFF'; $('sauto').style.background=s.seat_auto?'#1b7f3b':'#8a5a00';
  $('htype').textContent=(s.house_type||'?').toUpperCase(); $('htype').style.background=(s.house_type==='a')?'#b8860b':'#1565c0'; $('hdir').textContent=s.state_dir||'';
  $('stage').style.color=s.stage.startsWith('SEAT FAIL')?'#f66':'';$('wait').textContent=s.wait?'⏸ '+s.wait:'';
  $('tcp').textContent=s.tcp?`tcp ${s.tcp.slice(0,3).join(',')} rz${s.tcp[5]} grip ${s.grip}${s.frozen?' ❄FROZEN':''}`:'브리지 없음';

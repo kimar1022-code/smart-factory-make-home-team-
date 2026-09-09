@@ -883,11 +883,20 @@ def descend_monitored(color, x, y, rot, zs, g_close):
             return JAM_STEP
         return JAM_STEP_FAST
 
+    # ★9/9 사용자 제안: 채널 안 자유 구간(10mm 스텝)만 속도를 올린다. 진입부(처음 JAM_FINE_HEAD)와
+    #   안착부(마지막 JAM_FINE_TAIL_MM)는 1% 그대로 — 9/5 기둥 파손도, 오늘 막힘 4건도 전부 진입부(z+73~76)였다.
+    #   판정은 정지 상태에서 재므로 속도와 무관하고, 바뀌는 것은 접촉 순간의 관성뿐이다.
+    SPD_CHANNEL = 10
     n_step = 0
     z = max(zs, z0 - _step_mm(z0, n_step))
     speed(1)
+    _spd_now = 1
     try:
         while True:
+            _want = SPD_CHANNEL if _step_mm(z, n_step) == JAM_STEP_FAST else 1
+            if _want != _spd_now:
+                speed(_want); _spd_now = _want
+                print(f"    (하강 속도 {_want}% — {'채널 안 자유 구간' if _want > 1 else '진입부/안착부'})")
             move([x, y, z] + rot, tol=0.8, timeout=25, tag=f"z+{z - zs:.0f}")
             g = grip_read()
             cur = held_wall_dots_jam(color)
@@ -1017,6 +1026,23 @@ def jamtest(color, secs=40):
 
 RACK_REF = "/home/ar/bf2_console/rack_ref_0905.json"
 RACK_MAP = "/home/ar/bf2_console/cam2robot_rack.json"
+BASE_EXPO_F = "/home/ar/bf2_console/state/house/base_expo.json"   # 4/4 로 통과한 노출·게인 기억(9/9)
+
+
+def _remember_base_expo():
+    """건강 게이트를 4/4 로 통과한 지금 설정을 저장. 다음 벽 BASE 가 이 값부터 시도한다."""
+    import color_lock as CL
+    try:
+        c = CL.current_settings()
+        g = None
+        if os.path.exists(CL.STORE):
+            g = (json.load(open(CL.STORE)).get("apply") or {}).get("gain")
+        json.dump({"exposure": c.get("exposure"), "gain": g, "bright": c.get("bright"),
+                   "made": time.strftime("%Y-%m-%d %H:%M")}, open(BASE_EXPO_F, "w"), ensure_ascii=False, indent=1)
+    except Exception:
+        pass
+
+
 FLICKER_LADDER = (8, 20, 42, 83, 167, 250, 333, 417)   # 9/7 아침 직사광: 83 도 포화(밝기 224) → 저노출 8·20·42 추가(실측 42 에서 검출 최대)
 GAIN_LADDER = (16, 64)                        # 노출 사다리로 안 되면 gain 도 바꿔 본다(낮 16 / 밤 64)
 
@@ -1369,9 +1395,24 @@ def health_gate(max_try=4):
                 if rms < BASE_RMS_MAX:
                     ok += 1; rms_l.append(rms)
         return ok, (sum(rms_l) / len(rms_l) if rms_l else 99)
+    # ★9/9 사용자 제안: 직전에 4/4 로 통과한 노출·게인을 기억했다가 먼저 적용한다.
+    #   BASE 사이에 랙 관측(417)·서명(333~500)·하강 감시 사다리(83~800)가 노출을 바꿔놓아서,
+    #   다음 벽의 BASE 가 매번 첫 판정에 실패하고 8단계 사다리로 떨어졌다(오늘 19회 중 7회, 70~89s).
+    #   실패해도 종전 사다리로 가므로 손해가 없다(최악 +1.5s, 최선 −60s).
+    if os.path.exists(BASE_EXPO_F):
+        try:
+            _m = json.load(open(BASE_EXPO_F)); _cur = CL.current_settings().get("exposure")
+            if _m.get("exposure") and float(_m["exposure"]) != float(_cur or 0):
+                CL.expo(**{k: v for k, v in (("set", _m.get("exposure")), ("gain", _m.get("gain"))) if v})
+                time.sleep(1.5)
+                print(f"  기억한 베이스 노출 적용: {_m.get('exposure')} (gain {_m.get('gain')}, {_m.get('made')})")
+        except Exception as _e:
+            print(f"  (기억 노출 적용 실패 — 무시하고 진행: {_e})")
     ok, rms = score()
     if ok >= 3:
-        print(f"  건강 게이트 통과 ({ok}/4, rms {rms:.2f})"); return True
+        print(f"  건강 게이트 통과 ({ok}/4, rms {rms:.2f})")
+        _remember_base_expo()
+        return True
     cur = CL.current_settings().get("exposure")
     print(f"  건강 게이트 미달 ({ok}/4) → 노출 탐색 (현재 {cur})")
     best = (ok, cur)
