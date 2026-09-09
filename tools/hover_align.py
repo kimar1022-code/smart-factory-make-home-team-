@@ -148,8 +148,37 @@ def wall_dots(img, color, ref=None, seeds=None, src="wrist"):
     return pts[:2]
 
 
-def base_feats(img, exclude, src="wrist"):
-    """베이스 고정 특징 = 색점 중 든 벽 점이 아닌 것 전부(기둥 꼭대기 + 안착 벽 점). [(color,x,y,area)]"""
+# ★9/9 사용자 지적: 이 함수가 모으는 "베이스 고정 특징" 에는 **이미 꽂힌 다른 벽들의 점**이 섞인다.
+#   한 사이클 안에서는 고정이지만, 벽이 한 장 더 꽂히거나 빠지거나 조금 비뚤어지면 기준이 통째로 흔들리고,
+#   조명이 바뀌면 어떤 벽 점은 잡히고 어떤 건 안 잡혀 **엉뚱한 점끼리 짝지어진다**(9/9 16:56 축척 1.094 거부).
+#   기둥 점과 안착 벽 점은 둘 다 같은 색점이라 검출기로는 구분할 수 없다.
+#   → **ArUco 마커를 기준점으로 추가**한다. 마커는 벽이 바뀌어도 안 움직이고 노출에도 거의 안 흔들려,
+#     짝짓기의 닻 역할을 한다. 색점만으로 맞추던 것보다 축척이 튀기 어렵다.
+#   ⚠ 색별로 켠다 — 잘 되는 색의 정렬 경로는 건드리지 않는다.
+ALIGN_ARUCO = {"red_s"}         # 정렬 특징에 ArUco 마커를 함께 쓰는 색
+ALIGN_ARUCO_AREA = 400          # 마커를 특징 목록에 넣을 때 쓰는 가짜 면적(면적 게이트 통과용)
+
+
+def aruco_feats():
+    """ArUco 마커 중심을 정렬 특징으로. [( 'ar<id>', x, y, area )] — 없으면 빈 목록."""
+    try:
+        import base_twist as BT
+        m, why = BT.markers()
+        if not m:
+            return []
+        out = []
+        for mid, corners in sorted(m.items()):
+            xs = [c[0] for c in corners]; ys = [c[1] for c in corners]
+            out.append((f"ar{mid}", sum(xs) / 4.0, sum(ys) / 4.0, ALIGN_ARUCO_AREA))
+        return out
+    except Exception as e:
+        print(f"  (ArUco 특징 실패: {e})", flush=True)
+        return []
+
+
+def base_feats(img, exclude, src="wrist", color=None):
+    """베이스 고정 특징 = 색점 중 든 벽 점이 아닌 것 전부(기둥 꼭대기 + 안착 벽 점). [(color,x,y,area)]
+    color 가 ALIGN_ARUCO 에 있으면 ArUco 마커 중심을 함께 넣는다(9/9)."""
     lo_a, hi_a = DET[src]["feat_area"]
     if src == "wrist":
         d = PD.detect(img, None)
@@ -163,6 +192,10 @@ def base_feats(img, exclude, src="wrist"):
             if any(math.dist(p[:2], e[:2]) < (25 if src == "wrist" else 12) for e in exclude):
                 continue
             out.append((c, p[0], p[1], p[2]))
+    if src == "wrist" and color in ALIGN_ARUCO:
+        af = aruco_feats()
+        if af:
+            out.extend(af)
     return out
 
 
@@ -171,7 +204,7 @@ def measure(img, color, ref=None, seeds=None, src="wrist"):
     if len(w) < 1:
         return None, f"[{src}] 든 벽 점 0개(벽을 안 들었거나 기준 자리에 없음)"
     w = sorted(w, key=lambda q: (q[1], q[0]))
-    return {"wall": [(q[0], q[1], q[2]) for q in w], "pillars": base_feats(img, w, src)}, None
+    return {"wall": [(q[0], q[1], q[2]) for q in w], "pillars": base_feats(img, w, src, color)}, None
 
 
 MULTI_N = 5             # 정렬 측정에 쓸 프레임 수
@@ -381,6 +414,8 @@ def jinv_for(src, z_tcp, rz_tcp):
 WALL_COLUMN_PX = 80.0      # 든 벽 점과 같은 x 열(±이 값) 의 같은 색 특징은 벽의 것 → 기준에서 뺀다
 SAME_COLOR_NEAR_PX = 60.0  # 든 벽 점 이 거리 안의 같은 색 '기둥 특징'은 반사/벽 자신으로 보고 기준에서 뺀다
 COLLINEAR_PERP_PX = 25.0   # 매칭 특징의 직선 대비 수직 퍼짐이 이보다 좁으면 회전을 풀지 않는다
+WALL_PAIR_MAX_PX = 90.0    # ★9/9: 기준 벽 점 ↔ 측정 벽 점 1:1 짝 허용 거리. red_s 벽 점 간격 192px 의 절반(96px)보다
+#   작아야 엉뚱한 점끼리 짝지어지지 않는다. 이보다 멀면 짝짓지 말고 거부(완화가 아니라 오매칭 차단)
 
 
 def delta(ref, meas, z_tcp, rz_tcp, src="wrist"):
@@ -429,6 +464,28 @@ def delta(ref, meas, z_tcp, rz_tcp, src="wrist"):
         return None, f"[{src}] 특징 맞춤 rms {rms:.1f}px > {RMS_TOL_PX} — 오매칭 의심(안착 벽 이동/점 뒤바뀜)"
     w_exp = apply_sim(sim, ref["wall"]); w_now = np.array([p[:2] for p in meas["wall"]], float)
     one_dot = len(meas["wall"]) < 2 or len(ref["wall"]) < 2
+    # ★9/9 17:35 실기 크래시: 기준 벽 점 2개인데 측정이 3개(조각/반사) → w_now - w_exp 가
+    #   (3,2)-(2,2) 로 broadcast 에러. 지금까지 red_s 기준이 1점이라 one_dot 로 빠져 이 길을 안 탔다.
+    #   기준 각 점에 가장 가까운 측정 점을 1:1 로 붙이고 남는 것은 버린다. 짝이 멀면 오매칭이므로 거부.
+    if not one_dot and len(w_now) != len(w_exp):
+        used, pick, far = set(), [], 0.0
+        for e in w_exp:
+            best = None
+            for i, q in enumerate(w_now):
+                if i in used:
+                    continue
+                dd = float(np.hypot(q[0] - e[0], q[1] - e[1]))
+                if best is None or dd < best[0]:
+                    best = (dd, i)
+            if best is None:
+                break
+            used.add(best[1]); pick.append(best[1]); far = max(far, best[0])
+        if len(pick) != len(w_exp):
+            return None, f"[{src}] 든 벽 점 측정 {len(w_now)}개 ↔ 기준 {len(w_exp)}개 — 짝지을 수 없음"
+        if far > WALL_PAIR_MAX_PX:
+            return None, f"[{src}] 든 벽 점 짝 거리 {far:.0f}px > {WALL_PAIR_MAX_PX} — 오매칭 의심(재파지/기준 재촬영)"
+        print(f"  (든 벽 점 측정 {len(meas['wall'])}개 중 기준과 짝지은 {len(pick)}개 사용, 최대 짝 거리 {far:.0f}px)", flush=True)
+        w_now = w_now[pick]
     if one_dot:
         w_exp, w_now = w_exp[:1], w_now[:1]
         mid_exp, mid_now = tuple(w_exp[0]), tuple(w_now[0]); dang = -th

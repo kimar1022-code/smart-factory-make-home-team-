@@ -40,6 +40,7 @@ import slot_target as STG        # 부품: pillars_px / base_pose_robot / load_m
 import base_twist as BT          # 부품: markers / board_frame_transform / apply_sim  (ArUco 고정 자)
 import base_depth_corner as BDC  # 부품: depth_mask / detect_rect (INNER_WALL_MODE = 내벽 전용 대응 스위치)
 import side_seat as SSEAT       # 부품: 측면캠(:8771) 안착 판정 — 고정캠이라 로봇 자세와 무관(red_s 용)
+import fork_carry as FC          # 부품: 출하 리프트(포크 손잡이째 집을 출하지로) — 9/9 사용자 "리프트도 하우스 사이클에 넣어줘"
 
 STATE = os.environ.get("HOUSE_STATE", "/home/ar/bf2_console/state/house")
 os.makedirs(os.path.join(STATE, "logs"), exist_ok=True)
@@ -328,32 +329,6 @@ def aruco_correct(px4):
     return out, info
 
 
-# ★9/9 비전팀 보고("뎁스캠이 밝아졌다 어두워졌다"): 원인은 우리다.
-#   측정 단계마다 노출을 바꾸는데(기둥 42~83 · 든 벽 점 333~500 · 막힘 감시 사다리 83~800)
-#   끝나고 되돌리지 않아서, 사이클 중에는 밝기가 출렁이고 끝난 뒤에는 마지막 값이 그대로 남는다.
-#   실측 9/9 10:0x — 노출 417 로 남아 밝기 205(정상의 약 2배, 품질검사에는 과노출).
-#   → **측정이 없는 동안에는 평소 밝기로 되돌린다.** 각 측정 단계는 자기 노출을 스스로 잡으므로
-#     (find_base_4pts 건강 게이트 사다리 / hover_align.set_expo / descend_monitored 사다리)
-#     되돌려도 벽 꽂기에는 영향이 없다 — 사이클 중에는 아예 손대지 않는다.
-#   ★9/9 사용자 지시 정정: 평소 목표는 108 이 아니라 **새카메라(:8768) 정도의 밝기**다.
-#     비전팀이 "너무 밝아서 안 된다" 고 했고, 실측 손목캠 205 vs 새카메라 135 로 확인됐다.
-#     새카메라는 자동노출이라 조명이 바뀌면 따라간다 — 그래서 고정값을 박지 않고 **새카메라를 따라간다**.
-#     조명이 저녁에 어두워져도 자동으로 같이 내려간다.
-CAM_IDLE_SRC = "http://127.0.0.1:8768/expo"   # 밝기 기준 = 새카메라(자동노출)
-CAM_IDLE_FALLBACK = 135.0 # 새카메라를 못 읽을 때 쓰는 값(9/9 실측)
-CAM_IDLE_LO, CAM_IDLE_HI = 90.0, 175.0        # 새카메라가 튀어도 이 범위를 벗어나진 않게
-#   ★9/9 12:0x 실측으로 다시 고침: 순간값 하나로 판단했더니 1분에 3번 보정하며 노출이
-#     113→85→327 로 튀었다. 목표(새카메라)도 자동노출이라 같이 흔들리고, 손목캠 장면 자체도
-#     사람이 지나가면 변한다. 결과적으로 **비전팀이 호소한 그 출렁임을 내가 다시 만들고 있었다.**
-#     → ①여러 번 재서 중앙값 ②허용 폭을 넓히고 ③연속으로 벗어날 때만 ④쿨다운을 둔다.
-#     '평소 새카메라 수준 유지' 는 실시간 추종이 아니라 **느리게 맞춰 두는 것** 이 맞다.
-CAM_IDLE_TOL = 30.0       # 목표에서 이만큼 벗어나야 손댄다(순간 변동은 무시)
-CAM_IDLE_CONFIRM = 3      # 연속 이 횟수만큼 벗어나 있어야 실제로 보정한다
-CAM_IDLE_COOLDOWN = 180.0 # 보정 후 이 시간 동안은 다시 손대지 않는다
-CAM_IDLE_SAMPLES = 3      # 밝기 판단은 이만큼 재서 중앙값
-CAM_IDLE_AFTER = 20.0     # 마지막 작업 종료 후 이 시간이 지나야 손댄다
-CAM_IDLE_PERIOD = 10.0    # 확인 주기
-
 WB_FIX = 4600.0            # ★9/8 실증: WB 5500 이면 노출 250 에서 파랑 든 벽 점 면적이 1823 → 258 로 무너진다
 WB_TOL = 50.0
 
@@ -372,63 +347,6 @@ def check_wb():
             log(f"  ⚠ 손목캠 WB {wb:.0f}(자동 {awb:.0f}) — 기준 {WB_FIX:.0f} 로 되돌림 → {float(e2.get('wb',0)):.0f}")
     except Exception as ex:
         log(f"  (WB 확인 실패: {ex})")
-
-
-def cam_idle_watch():
-    """★측정이 없는 동안 손목캠을 '평소' 상태로 되돌리는 감시자(9/9 비전팀 요청).
-    비전팀이 같은 카메라를 품질검사에 쓰는데, 우리가 단계마다 노출을 바꾸고 안 되돌려서
-    밝기가 출렁였다. 사이클이 도는 동안에는 **절대 건드리지 않고**, 끝나고 조용해진 뒤에만
-    평소 밝기로 되돌린다. 되돌린 사실은 로그에 남긴다(조용히 바꾸지 않는다)."""
-    def _bright(url, n=CAM_IDLE_SAMPLES):
-        """순간값 하나를 믿지 않는다 — 여러 번 재서 중앙값."""
-        import statistics as _s
-        vals = []
-        for _ in range(n):
-            try:
-                d = json.loads(UR.urlopen(url, timeout=5).read().decode())
-                vals.append(float(d.get("bright", 0)))
-            except Exception:
-                pass
-            time.sleep(0.4)
-        return _s.median(vals) if vals else None
-
-    last_busy = time.time()
-    last_fix = 0.0
-    over = 0
-    said = False
-    while True:
-        time.sleep(CAM_IDLE_PERIOD)
-        try:
-            with LOCK:
-                busy = S.get("busy") or bool(S.get("wait"))
-            if busy:
-                last_busy = time.time(); over = 0; said = False
-                continue
-            if time.time() - last_busy < CAM_IDLE_AFTER:
-                continue
-            if time.time() - last_fix < CAM_IDLE_COOLDOWN:
-                continue
-            tgt = _bright(CAM_IDLE_SRC) or CAM_IDLE_FALLBACK
-            tgt = max(CAM_IDLE_LO, min(CAM_IDLE_HI, tgt))
-            br = _bright("http://127.0.0.1:8766/expo")
-            if br is None:
-                continue
-            if abs(br - tgt) <= CAM_IDLE_TOL:
-                over = 0; said = False
-                continue
-            over += 1
-            if over < CAM_IDLE_CONFIRM:          # 한 번 벗어난 것으로는 안 움직인다
-                continue
-            e0 = json.loads(UR.urlopen("http://127.0.0.1:8766/expo", timeout=5).read().decode())
-            UR.urlopen(f"http://127.0.0.1:8766/expo?bright={tgt:.0f}", timeout=25).read()
-            e2 = json.loads(UR.urlopen("http://127.0.0.1:8766/expo", timeout=5).read().decode())
-            log(f"  (손목캠 평소 상태 복귀: 밝기 {br:.0f} → {float(e2.get('bright',0)):.0f} "
-                f"[목표 {tgt:.0f} = 새카메라], 노출 {float(e0.get('exposure',0)):.0f} → "
-                f"{float(e2.get('exposure',0)):.0f})")
-            last_fix = time.time(); over = 0
-        except Exception as ex:
-            if not said:
-                log(f"  (손목캠 평소 복귀 실패: {ex})"); said = True
 
 
 def stage_base(color=None):
@@ -1133,24 +1051,14 @@ def run_held(color):
     set_stage("WAIT DESCEND", wait="[⬇ 하강] 버튼 (x·y·yaw 확인 후)", color=color)
 
 
-def align_here(color, from_below=False):
-    """든 채 정렬 자세(z_seat+HOVER_DZ)로 수직 이동 → 카메라 정렬 → WAIT DESCEND. SAFE 왕복 없음.
-
-    from_below=True (일시정지 재개): 하강 중간에 멈춘 자리에서도 **정렬 높이까지 되올라가** 다시 측정한다.
-      ★9/9 사용자 지시(서버 Pause/Resume 시나리오): "정지시켰다 재개하면 **다시 한번 위에서 측정하고**
-      내려오는 걸로 가자 — 벽이 들려 있을 경우". 멈춘 사이 베이스나 파지가 조금이라도 달라졌을 수 있는데,
-      그 자리에서 이어 내려가면 그 변화를 못 본 채로 밀어 넣게 된다. 우리 phase 는 전부 절대 목표라
-      되올라가 다시 재는 쪽이 안전하고 결과도 같다(계약 v0.3 §4 'phase 재시작' 과 같은 원칙)."""
+def align_here(color):
+    """든 채 z440 근처(±12)에서 정렬만 다시(SAFE 왕복 없음): z_seat+85 로 수직 이동 → ALIGN_SRCS 카메라로 정렬 → WAIT DESCEND."""
     ref = (jload(F["slot"]) or {}).get(color)
     if not ref:
         raise Gate(f"{color} 슬롯 기준 없음")
-    zs = ref["seat_tcp"][2]; zh = zs + HOVER_DZ.get(color, 85.0)
+    zs = ref["seat_tcp"][2]; zh = zs + 85.0
     cur = PC.st()["tcp"]
-    if from_below:
-        if cur[2] > zh + 12.0:
-            raise Gate(f"지금 z{cur[2]:.0f} 가 정렬 높이 z{zh:.0f} 보다 높다 — 재개 대상이 아니다")
-        log(f"  일시정지 재개: z{cur[2]:.0f} → 정렬 높이 z{zh:.0f} 로 수직 복귀 후 재측정")
-    elif abs(cur[2] - zh) > 12.0:
+    if abs(cur[2] - zh) > 12.0:
         raise Gate(f"지금 z{cur[2]:.0f} — z{zh:.0f}±12 에서만(든 채)")
     g = PC.grip_read(); rr = (jload(F["rack"]) or {}).get(color) or {}
     if g.isdigit() and int(g) <= rr.get("grip_close", 13):
@@ -1162,7 +1070,7 @@ def align_here(color, from_below=False):
         S.update(color=color, err=None, align=None, seat=None)
         if not S.get("target"):
             S["target"] = {"x": None, "y": None, "rz": None, "z_seat": zs, "user_fallback": True}
-    set_stage("2' HOVER ALIGN(재개)" if from_below else "2' HOVER ALIGN(재)", color=color)
+    set_stage("2' HOVER ALIGN(재)", color=color)
     PC.speed(SPD_SEAT); move([cur[0], cur[1], zh] + list(cur[3:]), tag=f"z{zh:.0f}")
     A = {"done": False}
     with LOCK: S["align"] = A
@@ -1325,6 +1233,37 @@ def probe_cam(src, color):
     HA.probe_fixed(src, color, seeds)                               # 부품(J·rot_sign 실측 → cam2robot_<src>.json)
 
 
+# ------------------------------------------------------------------ 출하 리프트(포크 운반)
+LIFT_GRIP_MIN = 20    # 그리퍼 실측이 이보다 작으면 벽을 문 채(외벽 7~13·내벽 6)일 수 있다 → 리프트 금지(리프트는 z≥400 에서 그리퍼를 연다)
+
+
+def _fork_move(tcp, tol=0.6, timeout=60, tag=""):
+    """fork_carry 는 검증된 PC.move 를 그대로 쓴다(house_cycle.move 의 1mm 되돌기·속도 변경을 섞지 않는다). 시작 전 중단만 본다.
+    이동 중 [⛔중단]은 handle_cmd 가 브리지에 stop 을 바로 보내고, PC.move 는 미도달로 예외 → 워커가 STOPPED 처리."""
+    if ABORT.is_set():
+        raise Abort()
+    return PC.move(tcp, tol=tol, timeout=timeout, tag=tag)
+
+
+def stage_lift():
+    """완성된 집을 포크 손잡이째 출하지로. 절차·게이트는 전부 fork_carry.carry() 것(9/8 사용자 지정, 9/9 부호·홈 수정판)."""
+    g = PC.grip_read()
+    if g.isdigit() and int(g) < LIFT_GRIP_MIN:
+        raise Gate(f"리프트 금지: 그리퍼 {g} < {LIFT_GRIP_MIN} — 벽을 물고 있을 수 있음(먼저 놓고 빈손으로)")
+    c = PC.st()["tcp"]
+    if c[2] < FC.OPEN_MIN_Z_START:
+        raise Gate(f"리프트 금지: z{c[2]:.0f} < {FC.OPEN_MIN_Z_START:.0f} — 손잡이 위 높이(z440 이상)로 올린 뒤")
+    set_stage("LIFT", color=None)
+    with LOCK: S["err"] = None
+    import types
+    FC.log = log                                                       # 포크 로그를 사이클 로그/화면으로
+    FC.PC = types.SimpleNamespace(move=_fork_move, speed=PC.speed, gripper=PC.gripper, st=PC.st, grip_read=PC.grip_read, post=PC.post)
+    log("══ 출하 리프트: 손잡이 위 z440 → 파란 점 보정 → z280 파지 47 → [속도10] z550→rz90→x-400→y-100→x-700→z285 → 개방 → z575 → 홈")
+    FC.carry(grasp=True)
+    set_stage("LIFT DONE")
+    log("✅ 출하 리프트 완료 — 집은 출하지 (-700,-100), 로봇은 홈")
+
+
 # ------------------------------------------------------------------ 명령 처리(워커 1개: 로봇을 움직이는 명령은 순차)
 Q = queue.Queue()
 
@@ -1338,7 +1277,6 @@ def worker():
             ABORT.clear()
             if op == "start": run_cycle(arg["color"], arg.get("teach_rack", False))
             elif op == "resume_held": run_held(arg["color"])
-            elif op == "resume_pause": align_here(arg["color"], from_below=True)
             elif op == "align_here": align_here(arg["color"])
             elif op == "descend": stage_descend(arg["color"])
             elif op == "descend_reteach": stage_descend_reteach(arg["color"])
@@ -1347,6 +1285,7 @@ def worker():
             elif op == "slot_both": teach_slot_both(arg["color"]); set_stage("IDLE")
             elif op == "run4": run_multi(arg.get("order") or RUN4_ORDER)
             elif op == "probe": set_stage(f"PROBE {arg['src']}"); probe_cam(arg["src"], arg["color"]); set_stage("IDLE")
+            elif op == "lift": stage_lift()
         except Abort:
             try: PC.post("stop", {"dry_run": False})
             except Exception: pass
@@ -1380,7 +1319,7 @@ def handle_cmd(q):
         r4 = S.get("run4"); in_run4_wait = bool(r4 and r4.get("active") and S.get("stage") == "WAIT DESCEND" and S.get("wait"))
     if op == "descend" and in_run4_wait:                             # ④run4 는 워커가 점유 중 → 하강 버튼 = 계속
         RESUME.set(); return {"ok": True, "note": "run4: 하강 진행"}
-    if op in ("start", "descend", "goto_obs", "slot2", "probe", "run4", "slot_both", "resume_held", "resume_pause", "descend_reteach", "align_here"):
+    if op in ("start", "descend", "goto_obs", "slot2", "probe", "run4", "slot_both", "resume_held", "descend_reteach", "align_here", "lift"):
         if S["busy"]:
             return {"ok": False, "err": "실행 중 — 먼저 중단"}
         order = [c for c in (q.get("order", [""])[0] or "").split(",") if c] or list(RUN4_ORDER)
@@ -1455,9 +1394,9 @@ pre{background:#000;padding:8px;height:340px;overflow:auto;font-size:24px;line-h
  <button class="big run" onclick="cmd('start')">▶ 사이클(1→2→2')</button>
  <button class="run" onclick="cmd('start',{teach:1})">▶ 사이클 + 랙 파지 티칭</button>
  <button class="run" onclick="cmd('resume_held')">▶ 든 채로 3단계부터(운반→z440 정렬→하강 대기)</button>
- <button class="run" onclick="cmd('resume_pause')">⏯ 일시정지 재개(든 채 정렬높이 복귀→재측정→하강 대기)</button>
  <button class="run" onclick="cmd('align_here')">▶ 여기서 정렬만 다시(z440, 든 채)</button>
  <button class="big run" onclick="if(confirm('4벽 연속 blue→yellow→red→red_s? 벽마다 빈손 베이스 재측정, 하강은 매번 [⬇ 하강] 버튼'))cmd('run4')">▶ 4벽 연속(run4)</button>
+ <button class="big run" onclick="if(confirm('출하 리프트? 집에 포크 손잡이 끼워져 있고 출하지(-700,-100) 비었나. 로봇은 빈손·z440 이상'))cmd('lift')">🏠 리프트(출하)</button>
  <button class="big down" id=desc onclick="if(confirm('수직 하강? x·y·yaw 확인했나'))cmd('descend')">⬇ 하강(3)</button>
  <button class="down" onclick="if(confirm('하강 → 안착 성공 시 든 채로 z440 올려 기준 재촬영 → 재하강·놓기?'))cmd('descend_reteach')">⬇ 하강+성공 시 z440 기준 재촬영</button>
  <button class="big stop" onclick="cmd('abort')">⛔ 중단</button>
@@ -1513,7 +1452,6 @@ class H(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     seed_state()
     threading.Thread(target=worker, daemon=True).start()
-    threading.Thread(target=cam_idle_watch, daemon=True).start()   # 9/9: 측정 없을 때 손목캠 평소 상태 유지
     if "--auto" in sys.argv:                                        # ④서버 기동과 함께 run4 를 대기열에(하강은 버튼)
         Q.put(("run4", {"order": list(RUN4_ORDER)})); log("--auto: run4 대기열 등록 (벽마다 하강은 [⬇ 하강] 버튼)")
     log(f"house_cycle :{PORT}  state={STATE}")
