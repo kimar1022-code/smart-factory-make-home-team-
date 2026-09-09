@@ -44,6 +44,23 @@ RANGES = {
     #   실측(z470 같은 프레임): 현재 200+115 조각 → 합집합 2324 하나 (파랑 1473·1318, 노랑 1936 과 같은 수준)
     "red":    [((135, 100, 55), (179, 255, 255)), ((0, 100, 55), (6, 255, 255))],
 }
+# ★9/9 밤 A타입: 좌하 기둥 점이 파랑이 아니라 **청록 스티커**(실측 노출 83~500: H 88~109 · S 80~179 · V 34~152).
+#   B 파랑(S 216~231)과 채도가 다르고 H 가 95 아래로 걸쳐 파랑 밴드에 안 들어온다.
+#   → A타입(state/house 링크가 house_a)일 때만 이 밴드로 잡아 '파랑' 목록에 넣는다(좌하 파랑 배치 규칙 그대로).
+#     S 상한 195 = 검은 기둥 몸통(S 200~230) 제외 · V 상한 200 = 흰 책상(V 250) 제외. B 경로는 건드리지 않는다.
+GREEN_A = ((85, 80, 25), (112, 195, 200))
+GREEN_A_AREA_MIN = 15           # 관측자세에서 면적 35~56 (파랑 점 60~90 보다 작다)
+_HOUSE_LINK = "/home/ar/bf2_console/state/house"
+
+
+def house_is_a():
+    import os
+    try:
+        return os.path.basename(os.path.realpath(_HOUSE_LINK)) == "house_a"
+    except Exception:
+        return False
+
+
 AREA_MIN, AREA_MAX = 40, 3200   # 9/6 19:1x: 빨강 랩어라운드 수정으로 점이 온전해지자 근거리(z470)에서 2324px² → 옛 상한 1800 에 걸려 사라짐. 같은 프레임 노랑 1936·파랑 1473
 CORNER_R_PX = 90          # 밑판 꼭짓점에서 이 반경 안의 색점만 기둥 후보로 인정
 FIT_REJECT_MM = 4.0       # 모델(200×130) 맞춤 오차가 이보다 크면 기둥 조합이 아니라고 본다
@@ -89,6 +106,19 @@ def detect(img, rect=None):
                 keep.append(p)
         return keep
     out = {k: _multi(r) for k, r in RANGES.items() if k != "blue_dark"}
+    if house_is_a():
+        # A타입 좌하 청록 점 → 파랑으로 합류(면적 하한만 따로). B 에서는 이 블록이 돌지 않는다.
+        _keep = globals()["AREA_MIN"]
+        try:
+            globals()["AREA_MIN"] = GREEN_A_AREA_MIN
+            out["blue"] = out["blue"] + _blobs(hsv, gray, *GREEN_A)
+            # 좌상 파랑도 빈 베이스·노출 42~83 에서는 48px 짜리라 열림 연산 뒤 하한 40 에 깎여 사라진다(9/9 실측).
+            #   A 에서만 그늘 파랑 밴드를 낮은 하한으로 한 번 더 돌린다(근접 12px 중복 제거).
+            for p in _blobs(hsv, gray, *RANGES["blue_dark"]):
+                if all(math.hypot(p[0] - q[0], p[1] - q[1]) > 12 for q in out["blue"]):
+                    out["blue"].append(p)
+        finally:
+            globals()["AREA_MIN"] = _keep
     # ★그늘 파랑점 병합(중복은 근접 제거)
     for p in _blobs(hsv, gray, *RANGES["blue_dark"]):
         if all(math.hypot(p[0] - q[0], p[1] - q[1]) > 12 for q in out["blue"]):

@@ -42,7 +42,48 @@ import base_depth_corner as BDC  # 부품: depth_mask / detect_rect (INNER_WALL_
 import side_seat as SSEAT       # 부품: 측면캠(:8771) 안착 판정 — 고정캠이라 로봇 자세와 무관(red_s 용)
 import fork_carry as FC          # 부품: 출하 리프트(포크 손잡이째 집을 출하지로) — 9/9 사용자 "리프트도 하우스 사이클에 넣어줘"
 
+# ★9/9 A타입 착수 준비: 기준 파일이 색 이름(blue/yellow/red/red_s/red_in)으로만 구분돼 있어서
+#   A타입에도 파랑 벽이 있으면 티칭하는 순간 B타입 파랑 기준을 덮어쓴다(어제 반나절 작업이 날아간다).
+#   → 집 타입별로 디렉터리를 나누고 state/house 는 **활성 타입을 가리키는 심볼릭 링크**로 둔다.
+#     ref_view·fork_carry·side_seat·hover_view 가 state/house 를 하드코딩하고 있어서,
+#     링크 방식이면 그 도구들을 하나도 안 고치고 전환된다.
+#   ⚠ 링크는 눈에 안 보인다 = 어느 타입인지 헷갈리면 그게 곧 사고다.
+#     그래서 기동 로그·상태·UI 에 활성 타입을 항상 띄운다.
 STATE = os.environ.get("HOUSE_STATE", "/home/ar/bf2_console/state/house")
+STATE_ROOT = os.path.dirname(os.path.abspath(STATE))
+HOUSE_TYPES = ("b", "a")
+
+
+def house_type():
+    """지금 활성인 집 타입. state/house 링크가 가리키는 곳으로 판단한다."""
+    try:
+        tgt = os.path.basename(os.path.realpath(STATE))       # house_b / house_a
+        if tgt.startswith("house_"):
+            return tgt[len("house_"):]
+    except Exception:
+        pass
+    return "?"
+
+
+def switch_house(t):
+    """활성 집 타입 전환. 기준이 섞이지 않게 링크만 갈아 끼운다(파일은 안 옮긴다)."""
+    t = str(t).strip().lower()
+    if t not in HOUSE_TYPES:
+        raise Gate(f"모르는 집 타입 {t!r} — {HOUSE_TYPES} 중 하나")
+    with LOCK:
+        if S.get("busy"):
+            raise Gate("작업 중에는 집 타입을 바꾸지 않는다")
+    dst = os.path.join(STATE_ROOT, f"house_{t}")
+    if not os.path.isdir(dst):
+        raise Gate(f"{dst} 없음 — 먼저 만들 것")
+    link = os.path.join(STATE_ROOT, "house")
+    if not os.path.islink(link):
+        raise Gate(f"{link} 가 심볼릭 링크가 아니다 — 수동 확인 필요(실수로 덮어쓸 위험)")
+    tmp = link + ".swap"
+    os.symlink(f"house_{t}", tmp)
+    os.replace(tmp, link)                                     # 원자적 교체
+    log(f"══ 집 타입 전환: {house_type().upper()} (기준 {os.path.realpath(STATE)})")
+    return house_type()
 os.makedirs(os.path.join(STATE, "logs"), exist_ok=True)
 F = {k: os.path.join(STATE, v) for k, v in {
     "slot": "slot_ref.json",        # 색별 {seat_tcp, base(x,y,yaw 로컬), made}
@@ -73,7 +114,9 @@ DESCEND_STOP_Z = None      # 9/8 14:3x 사용자 확정 안착 z(블루 356) 반
 #   하강 버튼을 누른 것 자체가 사람의 확인이다. 목표 z 까지 **막힘 없이** 내려갔으면 완료로 보고 그대로 개방·상승한다.
 #   단 카메라가 적극적으로 "잘못 앉았다(not_seated)"고 판정하면 그건 그대로 멈춘다 — unknown(판정 불가)만 통과.
 #   기준 승격은 하지 않는다(카메라로 확인된 게 아니므로 오늘 잡은 기준을 덮어쓰지 않는다).
-SEAT_UNKNOWN_AUTO = True
+# ★9/9 밤 A타입 티칭 중에는 False — 안착 판정 불가여도 그리퍼를 유지하고 그 자리에 서야
+#   그 자세에서 [슬롯 기준 1/2] 를 찍을 수 있다. A 기준이 다 잡히면 True 로 되돌릴 것.
+SEAT_UNKNOWN_AUTO = False
 HOVER_DZ = {"red_in": 102.0}   # 안착 z 위로 얼마에서 정렬하나(기본 85.0). red_in=338+102=440 = 기준을 찍은 높이
 RACK_ANG_MAX = 3.0                              # 랙 위 벽 각 변화 상한(넘으면 벽이 삐뚤게 놓인 것 → 정지)
 ARUCO_WARN_MM, ARUCO_WARN_DEG = 1.5, 0.3        # 고정 자 대비 카메라 복귀 오차 경고
@@ -1327,6 +1370,7 @@ def handle_cmd(q):
             return {"ok": False, "err": f"run4 순서 {order}?"}
         Q.put((op, {"color": color, "src": src, "order": order, "teach_rack": q.get("teach", ["0"])[0] == "1"})); return {"ok": True}
     try:                                                            # 로봇 이동 없는 즉시 명령
+        if op == "house": return {"ok": True, "house_type": switch_house(q.get("type", [""])[0])}
         if op == "slot1": teach_slot_tcp(color)
         elif op == "rack_offset": teach_rack_offset(color)
         elif op == "sig": teach_grasp_sig(color)
@@ -1338,8 +1382,11 @@ def handle_cmd(q):
 
 
 def snapshot():
+    # ★활성 집 타입을 항상 같이 내보낸다 — 어느 타입 기준으로 도는지 화면에서 바로 보이게.
     with LOCK:
         d = dict(S)
+    d["house_type"] = house_type()
+    d["state_dir"] = os.path.realpath(STATE)
     try:
         s = PC.st(); d["tcp"] = [round(v, 2) for v in s["tcp"]]; d["grip"] = s.get("gripper"); d["frozen"] = s.get("frozen")
     except Exception as e:
@@ -1409,6 +1456,12 @@ pre{background:#000;padding:8px;height:340px;overflow:auto;font-size:24px;line-h
  <button class="teach" onclick="cmd('hover_ref',{src:'wrist'})">z440 기준 저장(손목)</button>
  <button class="teach" onclick="cmd('hover_ref',{src:'newcam'})">(새카메라)</button> <button class="teach" onclick="cmd('hover_ref',{src:'side'})">(측면)</button><br>
  <button class="probe" onclick="cmd('probe',{src:'newcam'})">고정캠 매핑: 새카메라</button> <button class="probe" onclick="cmd('probe',{src:'side'})">측면캠</button></div>
+<div class=card><b>집 타입</b>
+ <span id=htype style="font-size:30px;font-weight:bold;padding:2px 14px;border-radius:6px;background:#1565c0;color:#fff">-</span>
+ <span id=hdir style="font-size:15px;color:#666"></span><br>
+ <button class="teach" onclick="if(confirm('집 타입을 B(기존 5벽)로 바꿀까요? 기준 세트가 통째로 바뀝니다'))cmd('house',{type:'b'})">B타입으로</button>
+ <button class="teach" onclick="if(confirm('집 타입을 A로 바꿀까요? 기준 세트가 통째로 바뀝니다 — A타입 기준은 아직 비어 있습니다'))cmd('house',{type:'a'})">A타입으로</button>
+ <div style="font-size:14px;color:#a33;margin-top:4px">티칭 저장은 <b>지금 선택된 타입</b>의 기준에 들어갑니다. 저장 전에 위 배지를 확인하세요.</div></div>
 <div class=card><b>게이트</b><div id=gates></div></div>
 <div class=card><b>기준 보유</b><div id=refs></div></div>
 <div class=card><b>수치</b><div id=nums></div></div>
@@ -1420,6 +1473,7 @@ function f(o){return o?JSON.stringify(o,(k,v)=>typeof v==='number'?+v.toFixed(2)
 try{const _c=localStorage.getItem('hc_color'); if(_c) $('color').value=_c;}catch(e){}   /* 9/7: 서버 재시작마다 색이 blue 로 리셋돼 엉뚱한 색으로 동작하는 사고가 반복 — 마지막 선택을 기억 */
 async function poll(){try{const s=await fetch('/state').then(r=>r.json());
  $('stage').textContent=s.stage+(s.err?'  ✖ '+s.err:'')+(s.run4?`  [run4 ${s.run4.idx+1}/${s.run4.order.length} ${s.run4.order[s.run4.idx]} 완료:${s.run4.done.join(',')||'-'}${s.run4.active?'':' 종료'}]`:'');
+ $('htype').textContent=(s.house_type||'?').toUpperCase(); $('htype').style.background=(s.house_type==='a')?'#b8860b':'#1565c0'; $('hdir').textContent=s.state_dir||'';
  $('stage').style.color=s.stage.startsWith('SEAT FAIL')?'#f66':'';$('wait').textContent=s.wait?'⏸ '+s.wait:'';
  $('tcp').textContent=s.tcp?`tcp ${s.tcp.slice(0,3).join(',')} rz${s.tcp[5]} grip ${s.grip}${s.frozen?' ❄FROZEN':''}`:'브리지 없음';
  $('gates').innerHTML=Object.entries(s.gates).map(([k,v])=>`<div class=${v?'ok':'no'}>${v?'✔':'✘'} ${k}</div>`).join('');
@@ -1454,5 +1508,5 @@ if __name__ == "__main__":
     threading.Thread(target=worker, daemon=True).start()
     if "--auto" in sys.argv:                                        # ④서버 기동과 함께 run4 를 대기열에(하강은 버튼)
         Q.put(("run4", {"order": list(RUN4_ORDER)})); log("--auto: run4 대기열 등록 (벽마다 하강은 [⬇ 하강] 버튼)")
-    log(f"house_cycle :{PORT}  state={STATE}")
+    log(f"house_cycle :{PORT}  ★집타입 {house_type().upper()}  기준={os.path.realpath(STATE)}")
     ThreadingHTTPServer(("0.0.0.0", PORT), H).serve_forever()

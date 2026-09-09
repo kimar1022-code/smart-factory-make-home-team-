@@ -92,11 +92,17 @@ def worker():
                     cv2.circle(out, (int(x), int(y)), 13, COL[c], 2)
                     cv2.putText(out, c[0].upper(), (int(x) + 16, int(y) + 5),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, COL[c], 2)
-                    lo, hi = PD.RANGES[c]
+                    # ★9/9: 빨강은 9/6 부터 범위가 리스트(랩어라운드 2구간) — 구간별 여유 중 최대를 쓴다.
+                    #   (그 뒤로 뷰가 재기동된 적이 없어 오늘 재기동하자 매 프레임 ValueError 로 상태가 안 올라갔다)
+                    rs = PD.RANGES[c]; rs = rs if isinstance(rs, list) else [rs]
                     w = hsv[max(0, int(y) - 5):int(y) + 6, max(0, int(x) - 5):int(x) + 6].reshape(-1, 3)
-                    inr = w[(w[:, 0] >= lo[0]) & (w[:, 0] <= hi[0]) & (w[:, 1] >= lo[1]) &
-                            (w[:, 1] <= hi[1]) & (w[:, 2] >= lo[2]) & (w[:, 2] <= hi[2])]
-                    mars.append(CL._margin(np.median(inr, axis=0), (lo, hi)) if len(inr) >= 5 else 0.0)
+                    best = 0.0
+                    for lo, hi in rs:
+                        inr = w[(w[:, 0] >= lo[0]) & (w[:, 0] <= hi[0]) & (w[:, 1] >= lo[1]) &
+                                (w[:, 1] <= hi[1]) & (w[:, 2] >= lo[2]) & (w[:, 2] <= hi[2])]
+                        if len(inr) >= 5:
+                            best = max(best, CL._margin(np.median(inr, axis=0), (lo, hi)))
+                    mars.append(best)
                 worst = min(mars) if mars else 0.0
                 # 유령: 꼭짓점 근처가 아닌 색 덩어리 — 회색 원으로 표시(무엇이 걸러졌는지 보이게)
                 for k, v in PD.detect(img, None).items():
