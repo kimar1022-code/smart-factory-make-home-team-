@@ -3,7 +3,7 @@
 
   사용자가 준 순서(그대로 따른다):
     그리퍼 47 파지 → z550 상승 → rz 90 → x -400 → y -100 → x -700 → z285 → 그리퍼 100 개방
-    → z575 상승 → 홈 자세
+    → z575 상승 → 홈 자세(fork.json home_tcp, 관측자세 아님)
 
   속도(사용자 지정): 손잡이 잡으러 갈 때·홈으로 갈 때 20, **포크를 들고 있는 동안은 10**.
 
@@ -86,8 +86,11 @@ def locate(cfg, tries=2):
         if not d:
             raise RuntimeError("손잡이 파란 점 미검출 — 파지 금지(포크 자리를 못 찾음)")
         du, dv = d[0] - ref[0], d[1] - ref[1]
-        dx = Ji[0][0] * du + Ji[0][1] * dv
-        dy = Ji[1][0] * du + Ji[1][1] * dv
+        # ★9/9 실기 증명(부호 버그): Ji·Δpx 는 "카메라가 기준에서 어디로 갔나" 이지 "어디로 되돌려야 하나" 가 아니다.
+        #   검출0 Δpx(-7.2,+6.5) → (-1.90,-1.67) 이동 → 검출1 Δpx(-14.6,+10.5) 로 잔차가 J 예측대로 2배.
+        #   어제는 손잡이가 기준 자리에 있어(Δ≈0) 부호가 시험되지 않았다. 되돌리려면 반대로 움직인다.
+        dx = -(Ji[0][0] * du + Ji[0][1] * dv)
+        dy = -(Ji[1][0] * du + Ji[1][1] * dv)
         log(f"  검출 {k}: 점 ({d[0]:.1f},{d[1]:.1f}) 면적 {d[2]} {d[3]}/5 · 기준 대비 "
             f"Δpx ({du:+.1f},{dv:+.1f}) → XY ({dx:+.2f},{dy:+.2f})mm")
         if max(abs(dx), abs(dy)) < TOL:
@@ -169,7 +172,12 @@ def carry(grasp=True):
     # ④ 빈 손 — 속도 20 으로 홈
     PC.speed(SPD_FREE)
     log(f"  ── 복귀 구간(속도 {SPD_FREE})")
-    PC.move(list(PC.OBS), tol=TOL, timeout=90, tag="홈(관측자세)")
+    # ★9/9 사용자 정정: 홈은 관측자세가 아니다. 9/8 에 내가 "홈 자세" 를 OBS 로 멋대로 대체했었다.
+    #   홈 = fork.json home_tcp (사용자가 조그로 맞춘 자세, 관절 90/-90/90/-90/-90/0). 없으면 가지 않고 멈춘다.
+    H = cfg.get("home_tcp")
+    if not H:
+        raise RuntimeError("fork.json 에 home_tcp 가 없다 — 홈 자세를 먼저 저장(관측자세로 대체하지 않는다)")
+    PC.move(list(H), tol=TOL, timeout=90, tag="홈")
     log(f"  ✓ 홈 {_tcp()}  그리퍼 {PC.grip_read()}")
     log("포크 운반 완료")
 
