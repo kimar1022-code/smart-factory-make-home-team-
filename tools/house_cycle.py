@@ -328,6 +328,32 @@ def aruco_correct(px4):
     return out, info
 
 
+# ★9/9 비전팀 보고("뎁스캠이 밝아졌다 어두워졌다"): 원인은 우리다.
+#   측정 단계마다 노출을 바꾸는데(기둥 42~83 · 든 벽 점 333~500 · 막힘 감시 사다리 83~800)
+#   끝나고 되돌리지 않아서, 사이클 중에는 밝기가 출렁이고 끝난 뒤에는 마지막 값이 그대로 남는다.
+#   실측 9/9 10:0x — 노출 417 로 남아 밝기 205(정상의 약 2배, 품질검사에는 과노출).
+#   → **측정이 없는 동안에는 평소 밝기로 되돌린다.** 각 측정 단계는 자기 노출을 스스로 잡으므로
+#     (find_base_4pts 건강 게이트 사다리 / hover_align.set_expo / descend_monitored 사다리)
+#     되돌려도 벽 꽂기에는 영향이 없다 — 사이클 중에는 아예 손대지 않는다.
+#   ★9/9 사용자 지시 정정: 평소 목표는 108 이 아니라 **새카메라(:8768) 정도의 밝기**다.
+#     비전팀이 "너무 밝아서 안 된다" 고 했고, 실측 손목캠 205 vs 새카메라 135 로 확인됐다.
+#     새카메라는 자동노출이라 조명이 바뀌면 따라간다 — 그래서 고정값을 박지 않고 **새카메라를 따라간다**.
+#     조명이 저녁에 어두워져도 자동으로 같이 내려간다.
+CAM_IDLE_SRC = "http://127.0.0.1:8768/expo"   # 밝기 기준 = 새카메라(자동노출)
+CAM_IDLE_FALLBACK = 135.0 # 새카메라를 못 읽을 때 쓰는 값(9/9 실측)
+CAM_IDLE_LO, CAM_IDLE_HI = 90.0, 175.0        # 새카메라가 튀어도 이 범위를 벗어나진 않게
+#   ★9/9 12:0x 실측으로 다시 고침: 순간값 하나로 판단했더니 1분에 3번 보정하며 노출이
+#     113→85→327 로 튀었다. 목표(새카메라)도 자동노출이라 같이 흔들리고, 손목캠 장면 자체도
+#     사람이 지나가면 변한다. 결과적으로 **비전팀이 호소한 그 출렁임을 내가 다시 만들고 있었다.**
+#     → ①여러 번 재서 중앙값 ②허용 폭을 넓히고 ③연속으로 벗어날 때만 ④쿨다운을 둔다.
+#     '평소 새카메라 수준 유지' 는 실시간 추종이 아니라 **느리게 맞춰 두는 것** 이 맞다.
+CAM_IDLE_TOL = 30.0       # 목표에서 이만큼 벗어나야 손댄다(순간 변동은 무시)
+CAM_IDLE_CONFIRM = 3      # 연속 이 횟수만큼 벗어나 있어야 실제로 보정한다
+CAM_IDLE_COOLDOWN = 180.0 # 보정 후 이 시간 동안은 다시 손대지 않는다
+CAM_IDLE_SAMPLES = 3      # 밝기 판단은 이만큼 재서 중앙값
+CAM_IDLE_AFTER = 20.0     # 마지막 작업 종료 후 이 시간이 지나야 손댄다
+CAM_IDLE_PERIOD = 10.0    # 확인 주기
+
 WB_FIX = 4600.0            # ★9/8 실증: WB 5500 이면 노출 250 에서 파랑 든 벽 점 면적이 1823 → 258 로 무너진다
 WB_TOL = 50.0
 
@@ -346,6 +372,63 @@ def check_wb():
             log(f"  ⚠ 손목캠 WB {wb:.0f}(자동 {awb:.0f}) — 기준 {WB_FIX:.0f} 로 되돌림 → {float(e2.get('wb',0)):.0f}")
     except Exception as ex:
         log(f"  (WB 확인 실패: {ex})")
+
+
+def cam_idle_watch():
+    """★측정이 없는 동안 손목캠을 '평소' 상태로 되돌리는 감시자(9/9 비전팀 요청).
+    비전팀이 같은 카메라를 품질검사에 쓰는데, 우리가 단계마다 노출을 바꾸고 안 되돌려서
+    밝기가 출렁였다. 사이클이 도는 동안에는 **절대 건드리지 않고**, 끝나고 조용해진 뒤에만
+    평소 밝기로 되돌린다. 되돌린 사실은 로그에 남긴다(조용히 바꾸지 않는다)."""
+    def _bright(url, n=CAM_IDLE_SAMPLES):
+        """순간값 하나를 믿지 않는다 — 여러 번 재서 중앙값."""
+        import statistics as _s
+        vals = []
+        for _ in range(n):
+            try:
+                d = json.loads(UR.urlopen(url, timeout=5).read().decode())
+                vals.append(float(d.get("bright", 0)))
+            except Exception:
+                pass
+            time.sleep(0.4)
+        return _s.median(vals) if vals else None
+
+    last_busy = time.time()
+    last_fix = 0.0
+    over = 0
+    said = False
+    while True:
+        time.sleep(CAM_IDLE_PERIOD)
+        try:
+            with LOCK:
+                busy = S.get("busy") or bool(S.get("wait"))
+            if busy:
+                last_busy = time.time(); over = 0; said = False
+                continue
+            if time.time() - last_busy < CAM_IDLE_AFTER:
+                continue
+            if time.time() - last_fix < CAM_IDLE_COOLDOWN:
+                continue
+            tgt = _bright(CAM_IDLE_SRC) or CAM_IDLE_FALLBACK
+            tgt = max(CAM_IDLE_LO, min(CAM_IDLE_HI, tgt))
+            br = _bright("http://127.0.0.1:8766/expo")
+            if br is None:
+                continue
+            if abs(br - tgt) <= CAM_IDLE_TOL:
+                over = 0; said = False
+                continue
+            over += 1
+            if over < CAM_IDLE_CONFIRM:          # 한 번 벗어난 것으로는 안 움직인다
+                continue
+            e0 = json.loads(UR.urlopen("http://127.0.0.1:8766/expo", timeout=5).read().decode())
+            UR.urlopen(f"http://127.0.0.1:8766/expo?bright={tgt:.0f}", timeout=25).read()
+            e2 = json.loads(UR.urlopen("http://127.0.0.1:8766/expo", timeout=5).read().decode())
+            log(f"  (손목캠 평소 상태 복귀: 밝기 {br:.0f} → {float(e2.get('bright',0)):.0f} "
+                f"[목표 {tgt:.0f} = 새카메라], 노출 {float(e0.get('exposure',0)):.0f} → "
+                f"{float(e2.get('exposure',0)):.0f})")
+            last_fix = time.time(); over = 0
+        except Exception as ex:
+            if not said:
+                log(f"  (손목캠 평소 복귀 실패: {ex})"); said = True
 
 
 def stage_base(color=None):
@@ -1430,6 +1513,7 @@ class H(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     seed_state()
     threading.Thread(target=worker, daemon=True).start()
+    threading.Thread(target=cam_idle_watch, daemon=True).start()   # 9/9: 측정 없을 때 손목캠 평소 상태 유지
     if "--auto" in sys.argv:                                        # ④서버 기동과 함께 run4 를 대기열에(하강은 버튼)
         Q.put(("run4", {"order": list(RUN4_ORDER)})); log("--auto: run4 대기열 등록 (벽마다 하강은 [⬇ 하강] 버튼)")
     log(f"house_cycle :{PORT}  state={STATE}")
