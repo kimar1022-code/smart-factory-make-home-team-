@@ -53,7 +53,11 @@ while true; do
     if [ -n "$dh" ] && [ "$dh" = "$d_prev_hash" ]; then d_frozen=$((d_frozen+1)); else d_frozen=0; fi
     d_prev_hash="$dh"
     [ "$d_frozen" -ge 3 ] && dead=1
-    if [ -n "$dbr" ] && awk "BEGIN{exit !($dbr < 5)}"; then dead=1; fi
+    # ★9/9 저녁: 사이클(:8776 busy)이 도는 동안은 '어둡다' 로 재기동하지 않는다.
+    #   베이스 측정 노출 사다리가 8~20 까지 내려가면 밝기 3~4 가 정상인데, 이걸 고장으로 보고 카메라를 죽여
+    #   사이클을 두 번(19:14·19:22) 세웠다. 얼음(같은 프레임 3회) 판정은 그대로 둔다.
+    hc_busy=$(curl -s -m2 http://127.0.0.1:8776/state 2>/dev/null | grep -oE '"busy": *(true|false)' | grep -oE 'true|false')
+    if [ "$hc_busy" != "true" ] && [ -n "$dbr" ] && awk "BEGIN{exit !($dbr < 5)}"; then dead=1; fi
     if [ "$dead" -eq 1 ]; then
       LOG "D435 이상(얼음 ${d_frozen}회 / 밝기 ${dbr:-?}) → 재기동"
       pkill -f "cam_server.py --source rs" 2>/dev/null; sleep 2

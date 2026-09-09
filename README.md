@@ -99,7 +99,9 @@ FR5 협동로봇 + ZeKeep ×2 + 터틀봇으로 **사람 개입 0** 조립식 �
 - `tools/color_lock.py` · `cam_autostart.sh` — 노출 기억·복원 · 카메라 자동복구.
 - `bridge_server.py` — FR5/ZK 브리지 (MoveIt 경유, J6 가드).
 - `bf2_robot_console.html` — 하모니 콘솔 (트윈·조그·리코더·카메라).
-- `state/house/` — 색별 기준(랙·파지 서명·호버·안착·슬롯). 실기 복구 시 `~/bf2_console/` 로 되돌리면 됨.
+- `state/house_a/` · `state/house_b/` — **집 타입별 기준 세트**(랙·파지 서명·호버·안착·슬롯).
+  실기에서는 `state/house` 가 둘 중 하나를 가리키는 **심볼릭 링크**이고, 콘솔(:8776) 상단 배지가 활성 타입을 보여준다.
+  복구 시 `~/bf2_console/state/` 로 되돌린 뒤 링크를 걸 것.
 - `docs/` — 날짜별 현황 · 재설계 문서 · 인수인계 런북.
 
 ---
