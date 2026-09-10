@@ -61,6 +61,11 @@ DET = {"wrist":  {"amin_wall": 150, "feat_area": (60, 3200), "near": 80.0, "sear
                              "red": [((0, 60, 60), (12, 255, 255)), ((160, 60, 60), (180, 255, 255))]},
                   "exclude": [(740, 410, 820, 500), (1150, 60, 1280, 320), (820, 560, 980, 720), (250, 495, 405, 600)]}}   # 9/7 1280×720 좌표(옛 640×480 값 2배) + 창 반사·바닥 반사(면적 1600·2192) 제외          # 검은 상자 위 파란 점(고정물, 베이스 아님) 제외
 HELD_BOX = (820, 0, 1280, 720)                  # 손목캠에서 든 벽이 보이는 영역(ref 생성 시)
+# ★9/10 A타입 내벽(노랑): 든 벽 점이 x≈764 · 면적 223 이라 외벽 기준(x≥820 · 면적 300)에 둘 다 걸린다.
+#   외벽 자세에 맞춰 잡힌 창이라 내벽 자세에서는 안 맞는 것 — 게이트 완화가 아니라 **자세별 창 보정**이다.
+#   사용자가 사진에 직접 표시한 두 점 (763,458)·(764,521) 을 담도록 색별로 넓힌다.
+HELD_BOX_BY_COLOR = {"yellow_in": (700, 0, 1280, 720)}
+HELD_AMIN_BY_COLOR = {"yellow_in": 150}
 SCALE_TOL, RMS_TOL_PX = 0.03, 6.0
 MAX_STEP_MM, MAX_STEP_DEG = 3.0, 0.5
 TOL_MM, TOL_DEG = 0.3, 0.15
@@ -74,6 +79,30 @@ MAX_ITER = 10                                   # 스텝 ≤3mm 라 20mm 급 초
 #   사다리가 250·167·83 로 내려가기만 해서 red_s 는 늘 경계 노출에 걸렸고, 노출이 바뀌면 점 중심이 23px(4.2mm) 움직여
 #   가짜 정렬 오차가 났다 → 위쪽까지 넓히고, 같은 매칭 수면 벽 점이 큰 노출을 고른다.
 HOVER_EXPO_LADDER = (250, 167, 83, 333, 417, 500)
+FLICKER_SAFE = (8, 20, 42, 83, 167, 250, 333, 417, 500)   # ★D435 는 이 값만 쓴다(9/1: 아니면 점이 35px 흔들림)
+EXPO_SETTLE_S = 1.4   # ★9/10 실측: 노출 변경 후 이만큼 기다려야 프레임이 안정된다(0.6s 면 전환 중 프레임 → 측정 실패/튐)
+NEWCAM_URL = "http://127.0.0.1:8768/expo"
+NEWCAM_TOL = 0.15          # 새카메라 밝기가 이만큼(±15%) 벗어나야 사다리를 옮긴다
+
+
+def newcam_bright():
+    """방이 얼마나 밝은지의 지표 — 새카메라는 자동노출이라 조명 변화를 그대로 따라간다.
+    ★절대 밝기를 손목캠에 맞추면 안 된다(9/10 실측: 새카메라 151 에 맞추면 손목캠 42 로 가는데
+      그 칸에서는 든 벽 점이 2개→1개로 줄어 회전을 못 본다). 변화량만 본다."""
+    try:
+        return float(json.loads(UR.urlopen(NEWCAM_URL, timeout=3).read()).get("bright") or 0) or None
+    except Exception:
+        return None
+
+
+def expo_shifted(base_expo, steps):
+    """플리커 안전 사다리에서 base_expo 로부터 steps 칸 이동한 값(범위 밖이면 끝 값)."""
+    try:
+        lad = sorted(FLICKER_SAFE)
+        i = min(range(len(lad)), key=lambda k: abs(lad[k] - float(base_expo)))
+        return float(lad[max(0, min(len(lad) - 1, i + steps))])
+    except Exception:
+        return float(base_expo)
 NEWCAM_MAP = SRC["newcam"]["map"]
 WALL_DOT_HSV = {
     "blue":   ((95, 150, 140), (115, 255, 255)),
@@ -85,10 +114,38 @@ WALL_DOT_HSV = {
     "red":    [((135, 90, 55), (179, 255, 255)), ((0, 90, 55), (12, 255, 255))],
     "red_s":  [((135, 90, 55), (179, 255, 255)), ((0, 90, 55), (12, 255, 255))],
     "red_in": [((135, 90, 55), (179, 255, 255)), ((0, 90, 55), (12, 255, 255))],
+    # ★9/10 A타입 내벽 2장 — 같은 표가 place_calc 에도 있다(9/7 함정: 한쪽만 고치면 절반만 낫는다).
+    "blue_in": ((100, 120, 90), (130, 255, 255)),
+    # ★9/10 저녁: 든 벽 점 실측 H 21~22 · S 196~210 · V 97~98 → V 하한 120 에만 걸려 사라졌다.
+    #   S 가 200 대라 흰 면·반사와 확실히 구분되므로 **V 하한만** 조명에 맞춘다(H·S 는 그대로 = 구분력 유지).
+    "yellow_in": ((15, 90, 80), (40, 255, 255)),
 }
 
 
-_FIXED_CAM_COLOR = {"red_s": "red", "red_in": "red"}   # 고정캠(newcam/side) 색 범위 대체
+_FIXED_CAM_COLOR = {"red_s": "red", "red_in": "red", "blue_in": "blue", "yellow_in": "yellow"}   # 고정캠(newcam/side) 색 범위 대체
+
+# ★9/10 사용자: red_s 벽 **옆면**에 노랑 점을 하나 더 붙였다. 손목캠은 위에서 보므로 옆면 점을 원리적으로 못 보고,
+#   새카메라는 옆에서 보므로 이 점이 보인다(화면 전체에서 유일한 노랑 = 오검출 여지 0, 재현성 σ 0.04mm).
+#   빨강 1점만으로는 **회전을 볼 수 없어** 15:36 막힘이 났다(벽이 죠 안에서 0.41° 돌았는데 1점이라 못 봄).
+#   → (색, 카메라)별로 '든 벽 점'의 색을 따로 지정한다. 기둥 특징 쪽은 종전대로 전 색을 본다.
+#   ★자리마다 새카메라에 유일한 색이 다르다(새카메라는 팔에 붙어 자리마다 시야가 바뀐다).
+#     red_s 자리: red 4개 / yellow 1개  → 벽 점 = 노랑
+#     노랑 자리 : red 1개 / yellow 1개  → 벽 점 = 빨강   (사용자가 노랑 벽 옆면에 빨간 점 추가, 9/10)
+#   "그 화면에서 유일한 색" 을 고르는 것이 규칙 — 같은 색이 여럿이면 엉뚱한 점을 물 수 있다.
+WALL_COLOR_BY_SRC = {("red_s", "newcam"): "yellow",
+                     ("yellow", "newcam"): "red"}
+
+# ★9/10 사용자 설계: "바닥의 두 노란점을 기준으로 선을 그어 그 선에 맞춘다".
+#   yellow_in 은 벽이 짧아 **든 벽 점이 어느 자세에서도 안 보인다**(실측 확인).
+#   → 든 벽을 기둥에 맞추는 대신 **로봇을 밑판에 맞춘다**: 밑판 특징이 기준 사진의 자리로 돌아오도록 로봇을 움직인다.
+#   벽은 제대로 물렸다고 믿는다(파지 확인 수단이 없음 — 사용자 지시).
+#   이득: 관측자세(z650)에서 잰 베이스(rms 1.2~2.2mm) 대신 **꽂을 자리 바로 위에서 그 자리를 직접** 본다(점 산포 0.02mm).
+BASE_ONLY_ALIGN = {"yellow_in"}
+
+
+def wall_color(color, src):
+    """든 벽 점을 찾을 때 쓸 색. 지정이 없으면 색 이름 그대로(= 종전 동작)."""
+    return WALL_COLOR_BY_SRC.get((color, src), color)
 
 # ------------------------------------------------------------------ 검출
 def grab(src="wrist"):
@@ -129,7 +186,8 @@ def _merge_fragments(pts, r):
 def wall_dots(img, color, ref=None, seeds=None, src="wrist"):
     """든 벽 점(1~2). ref 있으면 기준 자리 ±near 의 같은 색 점(물린 벽은 화면에서 거의 안 움직임).
     seeds(ref 생성용 좌표) 있으면 그 근처. 둘 다 없으면(손목캠) HELD_BOX 안 큰 점."""
-    pts = _merge_fragments(_blobs(img, color, 30 if src == "wrist" else 8, src), 30.0 if src == "wrist" else 10.0)
+    wcol = wall_color(color, src)
+    pts = _merge_fragments(_blobs(img, wcol, 30 if src == "wrist" else 8, src), 30.0 if src == "wrist" else 10.0)
     pts = [q for q in pts if q[2] >= DET[src]["amin_wall"]]
     near = DET[src]["near"]
     anchors = [(p[0], p[1]) for p in ref["wall"]] if ref else (seeds or None)
@@ -142,8 +200,9 @@ def wall_dots(img, color, ref=None, seeds=None, src="wrist"):
         return out
     if src != "wrist":
         return []
-    x0, y0, x1, y1 = HELD_BOX
-    pts = [q for q in pts if x0 <= q[0] <= x1 and y0 <= q[1] <= y1 and q[2] >= 300]
+    x0, y0, x1, y1 = HELD_BOX_BY_COLOR.get(color, HELD_BOX)
+    _amin = HELD_AMIN_BY_COLOR.get(color, 300)
+    pts = [q for q in pts if x0 <= q[0] <= x1 and y0 <= q[1] <= y1 and q[2] >= _amin]
     pts.sort(key=lambda q: -q[2])
     return pts[:2]
 
@@ -155,7 +214,40 @@ def wall_dots(img, color, ref=None, seeds=None, src="wrist"):
 #   → **ArUco 마커를 기준점으로 추가**한다. 마커는 벽이 바뀌어도 안 움직이고 노출에도 거의 안 흔들려,
 #     짝짓기의 닻 역할을 한다. 색점만으로 맞추던 것보다 축척이 튀기 어렵다.
 #   ⚠ 색별로 켠다 — 잘 되는 색의 정렬 경로는 건드리지 않는다.
-ALIGN_ARUCO = {"red_s"}         # 정렬 특징에 ArUco 마커를 함께 쓰는 색
+# ★9/10 yellow 추가: A타입 옐로 자리(= B red_s 자리)에서는 손목캠에 기둥이 1개만 들어온다.
+#   어제 기준(특징 4개)은 파랑·레드가 이미 꽂힌 상태에서 그 벽 점들을 특징으로 쓴 것이라,
+#   벽이 한 장뿐인 지금은 참조점이 사라져 정렬이 아예 못 돈다(9/7 "다른 벽 점에 기대던 기준" 과 같은 함정).
+#   → red_s 와 같은 처방: 책상 고정 ArUco 중심을 특징으로 함께 쓴다(기둥 1 + 마커 2 = 3개).
+# ★9/10 사용자 설계: "기둥 1개 + 든 벽 점 1개"만으로 정렬한다.
+#   왜: 지금까지 부족한 특징을 **꽂힌 벽의 점**으로 메워 왔는데(파랑 기준의 노랑 4개가 전부 옐로 벽 위였다),
+#       벽 배치가 바뀌는 사이클에서는 그 기준이 통째로 흔들린다. A 파랑은 **첫 벽**이라 베이스가 비어 있어 특히 치명적.
+#   근거(9/10 실측): 기둥 점 검출 산포 σ0.05px(=0.01mm) — 4점 닮음변환의 rms 1.0~1.7px(0.18~0.31mm)보다 오히려 정확하다.
+#       4점이 좋아 보였던 건 평균화가 아니라 **서로 다른 물체(벽·기둥)에 붙은 점**이라 편향이 섞여 있었기 때문.
+#   위험은 하나 — 바로 옆 벽 점 오인(실측 34.9px = 6.4mm 떨어져 색·면적까지 비슷). 그래서 아래 두 게이트를 건다.
+PILLAR_PICK_F = "/home/ar/bf2_console/state/house/pillar_pick.json"  # 색/캠별 '진짜 기둥' 위치(사용자 지정)
+SINGLE_SEARCH_PX = 15.0     # 기준 특징 1개일 때 매칭 반경 — 이웃 벽 점(34.9px)을 확실히 배제
+SINGLE_AREA_LO, SINGLE_AREA_HI = 0.6, 1.6   # 기준 면적 대비 허용(조각남·뭉침 배제)
+PICK_TOL_PX = 45.0          # 저장 시 화이트리스트 좌표에서 이만큼 안의 점만 기둥으로 인정
+
+
+def pillar_pick(color, src):
+    """사용자가 지정한 '진짜 기둥' 화면 위치들. state/house 아래라 집 타입별로 갈린다(B 에는 파일이 없어 종전 동작).
+
+    ★9/10 사용자: "동그라미 친 것만 신경써줘, 그거 외에는 다 끼워진 벽이니까"
+      → 한 점([x, y])뿐 아니라 **여러 점**([[x1,y1],[x2,y2], ...])도 받는다. 반환은 항상 [(x,y), ...] 또는 None.
+      새카메라의 red_s 처럼 기둥이 두 개 보이는 자리에서 나머지(끼워진 벽 점)를 전부 배제하기 위한 것."""
+    try:
+        v = (json.load(open(PILLAR_PICK_F)).get(color) or {}).get(src)
+    except Exception:
+        return None
+    if not v:
+        return None
+    if isinstance(v[0], (int, float)):          # [x, y] — 한 점(종전 형식)
+        return [(float(v[0]), float(v[1]))]
+    return [(float(q[0]), float(q[1])) for q in v]
+
+
+ALIGN_ARUCO = set()                        # ★9/10 네 색 모두 기둥1(또는 2)+벽점 방식으로 전환 — 마커는 책상 고정이라 밑판 이동을 못 따라감                    # ★9/10 yellow 도 제외: 기둥1+벽점1 방식으로 전환          # ★9/10 red 제외: 기둥1+벽점1 방식으로 전환(마커는 책상 고정이라 밑판 이동을 못 따라감)   # 정렬 특징에 ArUco 마커를 함께 쓰는 색(9/10 red 추가: A 에선 손목캠 기둥 2개뿐)
 ALIGN_ARUCO_AREA = 400          # 마커를 특징 목록에 넣을 때 쓰는 가짜 면적(면적 게이트 통과용)
 
 
@@ -201,9 +293,22 @@ def base_feats(img, exclude, src="wrist", color=None):
 
 def measure(img, color, ref=None, seeds=None, src="wrist"):
     w = wall_dots(img, color, ref, seeds, src)
+    if color in BASE_ONLY_ALIGN:
+        # ★밑판 기준 모드: 든 벽 점을 아예 쓰지 않는다(있어도 무시). 밑판 특징만 본다.
+        return {"wall": [], "pillars": base_feats(img, [], src, color)}, None
     if len(w) < 1:
         return None, f"[{src}] 든 벽 점 0개(벽을 안 들었거나 기준 자리에 없음)"
     w = sorted(w, key=lambda q: (q[1], q[0]))
+    # ★9/10: 지정 기둥이 '든 벽 점' 창(x≥820)에 들어오는 자리가 있다(red_s 실측: 기둥 (834,480) 이 벽으로 잡힘).
+    #   기둥을 벽으로 세면 정렬이 통째로 틀어지므로, 지정 좌표 근처의 점은 벽 목록에서 뺀다.
+    pk = pillar_pick(color, src)
+    if pk:
+        w2 = [q for q in w if all(math.hypot(q[0] - px, q[1] - py) > PICK_TOL_PX for px, py in pk)]
+        if len(w2) != len(w):
+            print(f"  (벽 목록에서 지정 기둥 근처 {len(w) - len(w2)}개 제외)", flush=True)
+        if not w2:
+            return None, f"[{src}] 든 벽 점 0개(지정 기둥 제외 후) — 벽을 안 들었거나 기준 자리에 없음"
+        w = w2
     return {"wall": [(q[0], q[1], q[2]) for q in w], "pillars": base_feats(img, w, src, color)}, None
 
 
@@ -252,7 +357,7 @@ def measure_multi(color, ref=None, seeds=None, src="wrist", n=MULTI_N):
 
     P, W = merge(accP, True), merge(accW, False)
     W.sort(key=lambda q: (q[1], q[0]))
-    if not W:
+    if not W and color not in BASE_ONLY_ALIGN:
         return None, f"[{src}] 든 벽 점 0개({ok}/{n}프레임)"
     n_min = min(len(p) for p in accP) if accP else 0
     if len(P) > n_min:
@@ -292,6 +397,7 @@ def expo_for_area(color, target_area, src="wrist", tries=6, tol=0.30, lo=42.0, h
     for _ in range(tries):
         e = max(lo, min(hi, e))
         set_expo(e)
+        time.sleep(EXPO_SETTLE_S)   # ★9/10: 노출 바꾼 직후 프레임은 전환 중이라 못 쓴다
         q = wall_dots(grab(src), color, None, None, src)
         a = max([p[2] for p in q], default=0)
         if a > 0:
@@ -327,6 +433,7 @@ def pick_hover_expo(color, ref):
     best = None
     for e in HOVER_EXPO_LADDER:
         set_expo(e)
+        time.sleep(EXPO_SETTLE_S)   # ★9/10: 노출 바꾼 직후 프레임은 전환 중이라 못 쓴다
         meas, why = measure(grab("wrist"), color, ref, None, "wrist")
         nw = len(meas["wall"]) if meas else 0
         nm = len(match_feats(ref["pillars"], meas["pillars"], DET["wrist"]["search"])[0]) if meas else 0
@@ -418,8 +525,54 @@ WALL_PAIR_MAX_PX = 90.0    # ★9/9: 기준 벽 점 ↔ 측정 벽 점 1:1 짝 �
 #   작아야 엉뚱한 점끼리 짝지어지지 않는다. 이보다 멀면 짝짓지 말고 거부(완화가 아니라 오매칭 차단)
 
 
-def delta(ref, meas, z_tcp, rz_tcp, src="wrist"):
-    s_, d_, lab = match_feats(ref["pillars"], meas["pillars"], DET[src]["search"])
+def _pred_shift_px(ref, z_tcp, rz_tcp, src, tcp_now):
+    """★9/10: 기준을 찍은 자리와 지금 자리가 다르면 **기둥은 화면에서 그만큼 밀려 보인다**(기둥은 세상에 고정,
+    카메라가 로봇과 함께 움직이므로). 그런데 매칭은 기준 픽셀 주변만 뒤져서, 3mm 만 떨어져도
+    16px 밀린 기둥을 15px 반경 밖이라고 놓쳤다(16:14·16:18 red_s 두 번 연속 정지).
+
+    반경을 늘리는 건 감지기를 무디게 하는 것이라 하지 않는다. 대신 **어디로 밀렸을지 예측해서 거기를 뒤진다.**
+      예측 = J · Δ로봇 (J = Jinv 의 역, mm→px)
+    실측 검증(16:18 자리): Δ로봇 (+2.70,−2.04)mm → 예측 (+11.2,−14.6)px, 실측 (+7,−14)px → 잔차 4.2px.
+    벽 점은 로봇과 함께 움직이므로 **밀지 않는다** — 기둥(베이스 특징)에만 적용."""
+    rt = ref.get("tcp")
+    if not rt or not tcp_now:
+        return (0.0, 0.0)
+    d_mm = np.array([tcp_now[0] - rt[0], tcp_now[1] - rt[1]], float)
+    if float(np.hypot(*d_mm)) < 0.3:                       # 같은 자리 — 굳이 밀지 않는다
+        return (0.0, 0.0)
+    try:
+        J = np.linalg.inv(jinv_for(src, z_tcp, rz_tcp)[0])
+    except Exception:
+        return (0.0, 0.0)
+    v = J @ d_mm
+    return (float(v[0]), float(v[1]))
+
+
+def color_base_only(ref):
+    """기준에 든 벽 점이 없으면 밑판 기준 모드(BASE_ONLY_ALIGN 색에서만 그렇게 저장된다)."""
+    return not ref.get("wall")
+
+
+def delta(ref, meas, z_tcp, rz_tcp, src="wrist", tcp_now=None):
+    single = len(ref["pillars"]) == 1
+    sx, sy = _pred_shift_px(ref, z_tcp, rz_tcp, src, tcp_now)
+    ref_p = ref["pillars"]
+    if sx or sy:
+        ref_p = [(c, x + sx, y + sy, a) for c, x, y, a in ref["pillars"]]
+        print(f"  (기준 자리와 {math.hypot(tcp_now[0]-ref['tcp'][0], tcp_now[1]-ref['tcp'][1]):.2f}mm 차 → "
+              f"[{src}] 기둥 예상 이동 ({sx:+.0f},{sy:+.0f})px 만큼 옮겨서 찾는다)", flush=True)
+    s_, d_, lab = match_feats(ref_p, meas["pillars"],
+                              SINGLE_SEARCH_PX if single else DET[src]["search"])
+    if sx or sy:
+        s_ = [(x - sx, y - sy) for x, y in s_]      # ★sim 은 반드시 '원래 기준 픽셀 → 지금' 이어야 한다
+    if single and s_:
+        # ★이웃 벽 점 오인 방어: 면적이 기준과 크게 다르면 다른 점을 문 것으로 본다.
+        rc, rx, ry, ra = ref["pillars"][0]
+        got = min(meas["pillars"], key=lambda q: math.hypot(q[1] - d_[0][0], q[2] - d_[0][1]))
+        if ra and not (SINGLE_AREA_LO * ra <= got[3] <= SINGLE_AREA_HI * ra):
+            return None, (f"[{src}] 기둥 면적 {int(got[3])} 이 기준 {int(ra)} 의 "
+                          f"{SINGLE_AREA_LO:.0%}~{SINGLE_AREA_HI:.0%} 밖 — 다른 점을 문 것으로 보고 정지")
+        lab = lab + [f"(기둥1: {rc} 면적 {int(got[3])}/{int(ra)}, 반경 {SINGLE_SEARCH_PX:.0f}px)"]
     if len(s_) < 1:
         return None, f"[{src}] 베이스 특징 매칭 {len(s_)}개(1 이상 필요) — 후보 {[(c, round(x), round(y)) for c, x, y, a in meas['pillars']]}"
     if len(s_) == 1:
@@ -462,6 +615,16 @@ def delta(ref, meas, z_tcp, rz_tcp, src="wrist"):
         return None, f"[{src}] 특징 축척 {s:.3f} — 기준과 높이/거리가 다름"
     if rms > RMS_TOL_PX:
         return None, f"[{src}] 특징 맞춤 rms {rms:.1f}px > {RMS_TOL_PX} — 오매칭 의심(안착 벽 이동/점 뒤바뀜)"
+    if color_base_only(ref):
+        # ★밑판 기준: 밑판 특징이 기준 자리에서 (tx,ty) 만큼 옮겨 보이면, 로봇이 밑판에 대해 그만큼 움직인 것이다.
+        #   되돌리려면 반대로 간다 → dpx = (-tx, -ty). (9/10 실측 검증: 밑판 점 이동 = +J·Δ로봇)
+        dpx = (-float(tx), -float(ty))
+        Jinv, rsign = jinv_for(src, z_tcp, rz_tcp)
+        dmm = Jinv @ np.array(dpx)
+        return {"src": src, "dpx": dpx, "dang_img": -th, "dmm": (float(dmm[0]), float(dmm[1])),
+                "drz": 0.0, "sim": {"s": s, "theta": th, "rms": rms},
+                "matched": lab + [f"(밑판 기준 모드: 특징 {len(s_)}개, 든 벽 점 미사용)"],
+                "one_dot": True, "scale_mm_px": float(np.hypot(*Jinv[:, 0])), "rz": rz_tcp}, None
     w_exp = apply_sim(sim, ref["wall"]); w_now = np.array([p[:2] for p in meas["wall"]], float)
     one_dot = len(meas["wall"]) < 2 or len(ref["wall"]) < 2
     # ★9/9 17:35 실기 크래시: 기준 벽 점 2개인데 측정이 3개(조각/반사) → w_now - w_exp 가
@@ -552,13 +715,40 @@ def save_ref(color, src="wrist", seeds=None, img=None):
     meas, why = measure(img, color, None, seeds, src)
     if not meas:
         raise RuntimeError(why)
-    if len(meas["pillars"]) < 2:
+    pick = pillar_pick(color, src)
+    if not pick and color not in BASE_ONLY_ALIGN:
+        # ★9/10 사용자 지적: "사진도 줬는데 왜 자꾸 맘대로 점을 넓게 해서 저장하나."
+        #   지정이 없으면 검출된 밑판 특징이 **전부** 기준에 들어가고, 거기엔 이미 꽂힌 벽의 점이 섞인다.
+        #   그 벽이 빠지거나 밀리면 기준이 통째로 틀어진다 → 지정 없이는 저장을 거부한다.
+        raise RuntimeError(
+            f"[{color}/{src}] 기둥 지정이 없다 — pillar_pick.json 에 이 카메라의 기준 점을 먼저 등록할 것. "
+            f"(지금 검출된 후보: {[(c, round(x), round(y), int(a)) for c, x, y, a in meas['pillars']]})")
+    if pick:
+        # ★지정된 기둥들만 남긴다 — 꽂힌 벽의 점이 기준에 섞이는 것을 원천 차단.
+        keep, used = [], []
+        for px, py in pick:
+            cand = [q for q in meas["pillars"] if math.hypot(q[1] - px, q[2] - py) <= PICK_TOL_PX]
+            if not cand:
+                raise RuntimeError(f"[{src}] 지정 기둥({px:.0f},{py:.0f}) 근처 {PICK_TOL_PX:.0f}px 안에 점이 없다 — 자세/노출 확인")
+            q = min(cand, key=lambda q: math.hypot(q[1] - px, q[2] - py))
+            if q not in keep:
+                keep.append(q); used.append((px, py))
+        dropped = [(c, round(x), round(y), int(a)) for c, x, y, a in meas["pillars"] if (c, x, y, a) not in [tuple(k) for k in keep]]
+        meas["pillars"] = keep
+        print(f"  (지정 기둥 {len(keep)}개만 사용: " +
+              ", ".join(f"{q[0]}({q[1]:.0f},{q[2]:.0f})a{int(q[3])}" for q in keep) +
+              f" · 제외 {len(dropped)}개 {dropped[:4]})")
+        if not meas["wall"] and color not in BASE_ONLY_ALIGN:
+            raise RuntimeError(f"[{src}] 든 벽 점 0개 — 기둥 1개 방식은 벽 점이 반드시 있어야 한다")
+    elif len(meas["pillars"]) < 2:
         raise RuntimeError(f"[{src}] 베이스 특징 {len(meas['pillars'])}개 — 이 자세에선 기준을 못 만든다(둘 다 보이는 자세 필요)")
     if len(meas["wall"]) < 2:
         print(f"  ⚠ [{src}] 든 벽 점 {len(meas['wall'])}개 — 위치만 정렬, 회전은 다른 카메라/랙 각으로")
     # ★9/7 실기(red_s): 든 벽 점 바로 옆(26px)에 같은 색 반사가 잡혀 '기둥 특징'으로 기준에 박혔다.
     #   벽 점과 같은 색이라 다음 정렬에서 벽 점을 이 특징에 짝지을 수 있다 → 벽 점 근처의 같은 색 특징은 기준에서 뺀다.
-    wcol = "red" if color in ("red", "red_s") else color
+    wcol = wall_color(color, src)
+    if (color, src) not in WALL_COLOR_BY_SRC:
+        wcol = "red" if color in ("red", "red_s") else color
     if meas["wall"]:
         keep = []
         for q in meas["pillars"]:
@@ -572,9 +762,10 @@ def save_ref(color, src="wrist", seeds=None, img=None):
                 print(f"  (기준에서 제외: 든 벽과 같은 x열의 같은 색 특징 {q[0]}({q[1]:.0f},{q[2]:.0f}) area {q[3]})")
                 continue
             keep.append(q)
-        meas["pillars"] = keep
-        if len(meas["pillars"]) < 2:
-            raise RuntimeError(f"[{src}] 같은 색 특징 제외 후 베이스 특징 {len(meas['pillars'])}개 — 기준 저장 불가")
+        if not pick:                      # 지정 기둥 방식은 이미 하나로 골라 뒀다 — 건드리지 않는다
+            meas["pillars"] = keep
+            if len(meas["pillars"]) < 2:
+                raise RuntimeError(f"[{src}] 같은 색 특징 제외 후 베이스 특징 {len(meas['pillars'])}개 — 기준 저장 불가")
     tcp = st()["tcp"]
     d = json.load(open(REF)) if os.path.exists(REF) else {}
     expo = None
@@ -583,7 +774,7 @@ def save_ref(color, src="wrist", seeds=None, img=None):
             expo = json.loads(UR.urlopen("http://127.0.0.1:8766/expo", timeout=3).read()).get("exposure")
         except Exception:
             pass
-    d.setdefault(color, {})[src] = {"wall": meas["wall"], "pillars": meas["pillars"], "tcp": tcp, "z": tcp[2], "expo": expo,
+    d.setdefault(color, {})[src] = {"wall": meas["wall"], "pillars": meas["pillars"], "tcp": tcp, "z": tcp[2], "expo": expo, "newcam_bright": newcam_bright(),
                                     "made": time.strftime("%Y-%m-%d %H:%M"), "note": "사용자 정렬 확인 상태(하강 직전)"}
     json.dump(d, open(REF, "w"), ensure_ascii=False, indent=1)
     print(f"✅ [{color}/{src}] 호버 기준 저장: 벽 점 {[(round(x), round(y)) for x, y, a in meas['wall']]} "
@@ -638,25 +829,49 @@ def check(color, srcs=None, roles=None):
             # ★9/7 red_s 사고: 기준은 노출 83 에서 찍혔는데 정렬 때 42 라 **노란 기둥 점이 사라져** 파랑 3개로만 맞춤 →
             #   좌표계가 틀어져 로봇을 y +3mm 엉뚱하게 옮김. 기준을 찍은 노출로 먼저 맞추고 잰다.
             try:
-                if abs(float(current_expo() or 0) - float(ref["expo"])) > 1.0:
-                    set_expo(float(ref["expo"])); time.sleep(0.6)
-                    print(f"  (기준 촬영 노출 {ref['expo']:.0f} 로 맞춤)", flush=True)
+                want = float(ref["expo"])
+                # ★9/10 사용자 제안 "새카메라 밝기를 따라가고, 안 되면 올리거나 내리자".
+                #   기준을 찍을 때의 새카메라 밝기와 지금을 비교해 **사다리 시작 칸만** 옮긴다.
+                #   (검출이 모자라면 그 아래 기존 사다리 폴백이 계속 훑는다)
+                nb0, nb1 = ref.get("newcam_bright"), newcam_bright()
+                if nb0 and nb1 and nb0 > 1:
+                    r = nb1 / nb0
+                    if r < 1 - NEWCAM_TOL:            # 방이 어두워졌다 → 노출 한 칸 위
+                        want = expo_shifted(want, +1 if r > 0.6 else +2)
+                        print(f"  (새카메라 밝기 {nb0:.0f}→{nb1:.0f}, 어두워짐 → 기준 노출 {ref['expo']:.0f}→{want:.0f})", flush=True)
+                    elif r > 1 + NEWCAM_TOL:          # 밝아졌다 → 한 칸 아래
+                        want = expo_shifted(want, -1 if r < 1.7 else -2)
+                        print(f"  (새카메라 밝기 {nb0:.0f}→{nb1:.0f}, 밝아짐 → 기준 노출 {ref['expo']:.0f}→{want:.0f})", flush=True)
+                if abs(float(current_expo() or 0) - want) > 1.0:
+                    set_expo(want); time.sleep(EXPO_SETTLE_S)   # ★9/10: 0.6s 로는 전환 중 프레임을 읽는다(실측 1.2~1.4s 필요)
+                    print(f"  (기준 촬영 노출 {want:.0f} 로 맞춤)", flush=True)
             except Exception:
                 pass
         img = grab(src)
         meas, why = measure_multi(color, ref, None, src)      # ★단발 → 다중프레임 병합
-        if src == "wrist" and (not meas or len(meas["pillars"]) < 2) and not check.expo_done:
+        if src == "wrist" and (not meas or len(meas["pillars"]) < max(2, len(ref["pillars"]))) and not check.expo_done:
             check.expo_done = True
             if pick_hover_expo(color, ref) is not None:
                 meas, why = measure(grab(src), color, ref, None, src)
+        # ★9/10: 조종하지 않는 카메라(role="measure")의 실패는 정렬 전체를 멈추면 안 된다.
+        #   참고용으로 재는 것이라 못 재면 "못 쟀다"고 남기고 넘어가는 게 맞다(B타입 파랑 wrist=measure 가
+        #   rms 7.1px 로 실패했다고 사이클이 멈춘 사례). 조종 카메라(xy/rz/both)의 실패는 그대로 정지.
+        def _bail(why_):
+            if roles.get(src, "both") == "measure":
+                print(f"  (참고 카메라 [{src}] 측정 실패 — 정렬은 계속: {why_})", flush=True)
+                return None          # 이 src 는 건너뛴다
+            return ("STOP", why_)
         if not meas:
-            return None, per, why
+            _b = _bail(why)
+            if _b is None: continue
+            return None, per, _b[1]
         # ★기준 특징이 다 안 잡히면 좌표계가 틀어진다(red_s 3mm 오차의 진범).
         #   멈추기 전에 노출 사다리로 되찾아 본다 — 못 찾을 때만 정지.
         if src == "wrist" and len(meas["pillars"]) < len(ref["pillars"]):
             keep = current_expo()
             for e in ([float(ref["expo"])] if ref.get("expo") else []) + list(HOVER_EXPO_LADDER):
                 set_expo(e)
+                time.sleep(EXPO_SETTLE_S)   # ★9/10: 노출 바꾼 직후 프레임은 전환 중이라 못 쓴다
                 m2, _w2 = measure_multi(color, ref, None, src)
                 if m2 and len(m2["pillars"]) >= len(ref["pillars"]):
                     print(f"  (기둥 특징 {len(meas['pillars'])}→{len(m2['pillars'])}개: 노출 {e:.0f} 로 되찾음)", flush=True)
@@ -668,11 +883,16 @@ def check(color, srcs=None, roles=None):
         #   10mm 짜리 엉뚱한 보정을 내놓았다(파랑 15:42 기준이 15:56 픽 변경보다 앞서 낡았던 것).
         #   개수가 모자라면 푸는 게 아니라 기준을 다시 찍는 것이 맞다.
         if len(meas["pillars"]) < len(ref["pillars"]):
-            return None, per, (f"[{src}] 기둥 특징 {len(meas['pillars'])}개 < 기준 {len(ref['pillars'])}개 — "
-                               f"노출 사다리로도 못 되찾음(기준 노출 {ref.get('expo')}). 좌표계가 틀어져 정지")
-        D, why = delta(ref, meas, z, rz, src)
+            _w = (f"[{src}] 기둥 특징 {len(meas['pillars'])}개 < 기준 {len(ref['pillars'])}개 — "
+                  f"노출 사다리로도 못 되찾음(기준 노출 {ref.get('expo')}). 좌표계가 틀어져 정지")
+            _b = _bail(_w)
+            if _b is None: continue
+            return None, per, _b[1]
+        D, why = delta(ref, meas, z, rz, src, tcp_now=t)
         if D is None:
-            return None, per, why
+            _b = _bail(why)
+            if _b is None: continue
+            return None, per, _b[1]
         per[src] = D
         last[src] = {"wall": meas["wall"], "pillars": meas["pillars"], "tcp": t, "z": z}
     promote_ref.last[color] = last
@@ -863,7 +1083,7 @@ def main():
         m1, why = measure(now_img, color, ref, None, src)
         if not m1: print("❌ 지금 프레임:", why); return
         print(f"지금: 벽 {[(round(x), round(y), a) for x, y, a in m1['wall']]}  특징 {[(c, round(x), round(y), a) for c, x, y, a in m1['pillars']]}")
-        D, why = delta(ref, m1, z, rz, src)
+        D, why = delta(ref, m1, z, rz, src, tcp_now=st()["tcp"])
         print(fmt(D) if D else "❌ " + why)
         if D:
             for l in D["matched"]: print("   ", l)
