@@ -2583,12 +2583,19 @@ class FR5Real:
 
     def grip_read(self):
         """그리퍼 위치 1회 실측 — Recorder 캡처가 옛 명령값을 담던 문제(8/25).
-        ⚠연속 폴링 금지(8/19 ServoJ 굶김) — 캡처 클릭 같은 단발 시점 전용."""
+        ⚠연속 폴링 금지(8/19 ServoJ 굶김) — 캡처 클릭 같은 단발 시점 전용.
+
+        ★9/10: 여기서 읽은 값을 `_grip_real` 에도 넣는다. 사이클은 파지할 때마다 이 함수를 부르는데
+        (`그리퍼 닫기 8 → 실측 15`) 그 신선한 값이 `gripper_real` 필드에 안 들어가서
+        /cell/status 의 grip_real_age_s 가 47시간까지 낡아 있었다. 추가 통신 0 — 이미 읽은 값을 기록만 한다.
+        (연속 폴링을 켜는 것이 아니므로 8/19 굶김과 무관하다.)"""
         self._ensure()
         res = str(self._svc()._call("GetGripperCurPosition()")).strip()   # '0,fault,pos'
         v = res.split(",")
         if v[0] == "0" and len(v) >= 3:
             self.grip_pos = int(v[2])
+            self._grip_real = self.grip_pos
+            self._grip_real_t = time.time()
         return self.grip_pos
 
     def vacuum(self, on):

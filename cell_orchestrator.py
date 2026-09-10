@@ -485,6 +485,11 @@ class CellOrchestrator(Node):
 
         self.pub_status = self.create_publisher(String, "/cell/status", 10)
         self.pub_event = self.create_publisher(String, "/cell/event", 10)
+        # ★9/10 서버 요청: 그리퍼 개도를 /cell/status 로 함께 보낸다(기존 필드 불변, 추가만).
+        #   ★1Hz 상태 발행을 막지 않도록 **별도 스레드**가 브리지를 폴링하고, tick_status 는 캐시만 읽는다
+        #     (브리지가 그리퍼 동작 중 5초 멈추는 일이 있다 — 9/10 실측. 그때 상태 발행이 끊기면 안 된다).
+        self._grip = {"grip": None, "grip_real": None, "grip_real_age_s": None, "t": 0.0}
+        threading.Thread(target=self._grip_poller, daemon=True).start()
         self.create_timer(1.0, self.tick_status)
 
         self.create_service(CellControl, "/cell/control", self.srv_control)
@@ -1132,6 +1137,41 @@ class CellOrchestrator(Node):
         fb.robot = run.robot
         gh.publish_feedback(fb)
 
+    # ---------- 그리퍼 상태 폴링(브리지) ----------
+    GRIP_URL = "http://127.0.0.1:8765/status"
+    GRIP_STALE_S = 5.0          # 브리지를 이 시간 넘게 못 읽으면 전부 null(옛 값을 최신인 척 보내지 않는다)
+    GRIP_REAL_MAX_AGE_S = 30.0  # ★9/10: 브리지가 준 '실측' 자체가 이보다 낡으면 grip_real 은 null.
+    #   실측은 8/19 서보 굶김 사고 때문에 **유휴에서만·2.5s 스로틀·기본 OFF** 다(bridge_server._safe_grip_read 7중 게이트).
+    #   그래서 값이 몇 시간씩 낡을 수 있는데(실제 171409s=47시간 관측), 그대로 내보내면
+    #   유니티 디지털 트윈이 옛 개도를 현재값으로 그린다. 나이를 보고 null 로 끊는다 — age 는 그대로 실어 보낸다.
+
+    def _grip_poller(self):
+        """브리지에서 FR5 그리퍼 개도를 읽어 캐시한다. 실패는 조용히 넘기고 값만 낡게 둔다."""
+        import urllib.request as _u
+        while True:
+            try:
+                d = json.loads(_u.urlopen(self.GRIP_URL, timeout=1.5).read())
+                f = (d.get("robots") or {}).get("fr5") or {}
+                gr = f.get("gripper_real")
+                self._grip = {"grip": f.get("gripper"),
+                              "grip_real": int(gr) if isinstance(gr, (int, float)) or (isinstance(gr, str) and str(gr).isdigit()) else None,
+                              "grip_real_age_s": round(float(f["gripper_real_age"]), 1) if f.get("gripper_real_age") is not None else None,
+                              "t": time.monotonic()}
+            except Exception:
+                pass
+            time.sleep(1.0)
+
+    def _grip_fields(self):
+        """상태에 실을 그리퍼 3필드. 폴링이 끊겼으면 전부 null, 실측만 낡았으면 grip_real 만 null."""
+        g = self._grip
+        if not g.get("t") or time.monotonic() - g["t"] > self.GRIP_STALE_S:
+            return {"grip": None, "grip_real": None, "grip_real_age_s": None}
+        out = {k: g[k] for k in ("grip", "grip_real", "grip_real_age_s")}
+        age = out.get("grip_real_age_s")
+        if age is None or age > self.GRIP_REAL_MAX_AGE_S:
+            out["grip_real"] = None          # 나이(age)는 남겨 둔다 — 왜 null 인지 서버가 알 수 있게
+        return out
+
     # ---------- /cell/status 1Hz ----------
     def tick_status(self):
         self.seq += 1
@@ -1147,6 +1187,10 @@ class CellOrchestrator(Node):
                 state = run.phase
             robots[name] = {"state": state, "connected": connected,
                             "joints": seen[1] if seen else [], "error": None}
+            if name == "fr5":
+                # grip=명령값 / grip_real=실측(없거나 낡으면 null) / grip_real_age_s=실측이 몇 초 전 값인지.
+                #   ★"부품을 잡고 있나"는 grip_real 로 판단해야 한다 — 명령값은 보냈다는 뜻일 뿐이다.
+                robots[name].update(self._grip_fields())
         run = self.active
         active = None
         if run is not None:

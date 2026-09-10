@@ -25,7 +25,9 @@ BR = "http://127.0.0.1:8765"
 CAL = "/home/ar/bf2_console/dot_calib.json"
 OBS = [200.0, -330.0, 650.0, 180.0, 0.0, 180.0]      # 관측자세(매핑 기준)
 SAFE_Z, HOVER_Z = 650.0, 478.0
-SEAT_Z = {"blue": 355.0, "yellow": 354.0, "red": 353.0, "red_s": 351.0, "red_in": 338.0}
+# ★9/10 A타입 내벽 2장 신설(blue_in·yellow_in). 안착 z 는 **티칭 전 임시값** — slot_ref 가 생기면 그걸 쓴다.
+SEAT_Z = {"blue": 355.0, "yellow": 354.0, "red": 353.0, "red_s": 351.0, "red_in": 338.0,
+          "blue_in": 340.0, "yellow_in": 340.0}
 SPD_MOVE, SPD_DESC, SPD_SEAT = 30, 10, 3
 
 
@@ -164,7 +166,7 @@ def grasp_measure(color="blue", rack_dang=None):
         return None, "든 벽 점 0개"
     scale = ref.get("wall_scale_mm_per_px") or wall_scale(color)
     if len(pts) >= 2 and n_ref >= 2:
-        (x1, y1, _), (x2, y2, _) = pts[0], pts[-1]
+        (x1, y1, *_), (x2, y2, *_) = pts[0], pts[-1]   # ★9/10: wall_dots_cam1 은 5개(x,y,면적,잘림,y_top) — 개수에 안 흔들리게
         ang = math.degrees(math.atan2(x2 - x1, y2 - y1)); mid = ((x1 + x2) / 2, (y1 + y2) / 2)
         dang = HG.wrap_deg(ang - ref["cam1_wall_ang_deg"]); how = "2점"
     else:
@@ -246,7 +248,7 @@ def save_grasp_sig_now(color, grip_cmd, gr):
     if not pts:
         print("  ⚠ 서명 저장 실패: 벽 점 0개"); return None
     if len(pts) >= 2:
-        (x1, y1, _), (x2, y2, _) = pts[0], pts[-1]
+        (x1, y1, *_), (x2, y2, *_) = pts[0], pts[-1]   # ★9/10: wall_dots_cam1 은 5개(x,y,면적,잘림,y_top) — 개수에 안 흔들리게
         ang = math.degrees(math.atan2(x2 - x1, y2 - y1)); L = math.hypot(x2 - x1, y2 - y1); mid = [(x1 + x2) / 2, (y1 + y2) / 2]
     else:
         ang, L, mid = 0.0, 0.0, [pts[0][0], pts[0][1]]
@@ -376,6 +378,11 @@ WALL_DOT_HSV = {                       # 물고 있는 벽의 점 색(손목캠,
     "red":    [((135, 90, 55), (179, 255, 255)), ((0, 90, 55), (12, 255, 255))],
     "red_s":  [((135, 90, 55), (179, 255, 255)), ((0, 90, 55), (12, 255, 255))],
     "red_in": [((135, 90, 55), (179, 255, 255)), ((0, 90, 55), (12, 255, 255))],
+    # ★9/10 A타입 내벽: 점 색이 파랑/노랑 → 같은 이름의 외벽 범위를 그대로 쓴다(스티커가 같은 것).
+    "blue_in": ((100, 120, 90), (130, 255, 255)),
+    # ★9/10 저녁: 든 벽 점 실측 H 21~22 · S 196~210 · V 97~98 → V 하한 120 에만 걸려 사라졌다.
+    #   S 가 200 대라 흰 면·반사와 확실히 구분되므로 **V 하한만** 조명에 맞춘다(H·S 는 그대로 = 구분력 유지).
+    "yellow_in": ((15, 90, 80), (40, 255, 255)),
 }
 
 
@@ -430,7 +437,7 @@ def capture_grasp_sig(color, grip_cmd):
     ref.setdefault("by_color", {})
     if len(pts) >= 1:
         if len(pts) >= 2:
-            (x1, y1, _), (x2, y2, _) = pts[0], pts[-1]
+            (x1, y1, *_), (x2, y2, *_) = pts[0], pts[-1]   # ★9/10: wall_dots_cam1 은 5개(x,y,면적,잘림,y_top) — 개수에 안 흔들리게
             ang = math.degrees(math.atan2(x2 - x1, y2 - y1)); L = math.hypot(x2 - x1, y2 - y1); mid = [(x1 + x2) / 2, (y1 + y2) / 2]
         else:
             ang, L, mid = 0.0, 0.0, [pts[0][0], pts[0][1]]          # 1점(노랑·red_s): 위치 서명만
@@ -471,6 +478,8 @@ BASE_LAST = "/home/ar/bf2_console/base_pose_last.json"
 
 
 BASE_RMS_MAX = 2.5         # 9/7: 기둥 4점이 완전한 직사각형이 아니라 rms 1.55~2.00 이 정상(8/8 재현) — 2.0 기준은 경계에 걸려 1/4 로 떨어졌다
+RETRY_IN_PLACE = 4         # ★제자리에서 다시 보는 횟수(로봇 안 움직임, 1회차에 노출 사다리 포함)
+BASE_SEARCH_MOVE = False   # ★★사용자 철칙(9/10): 베이스 못 찾아도 로봇을 움직여 찾지 않는다. 멈추고 알린다.
 SEARCH_ROUNDS = 4          # 베이스 4점 탐색 최대 라운드
 SEARCH_MAX_TOTAL_MM = 70.0 # ★관측자세에서 이보다 멀리 가면 탐색 중단(9/7: 반사광 쫓아 117mm 이탈)
 SEARCH_CLIP_MM = 60.0      # 한 번에 옮기는 카메라 XY 상한
@@ -509,6 +518,31 @@ def find_base_4pts(holding=False):
     반환 (px4, Δxy). 끝까지 못 찾으면 예외."""
     import slot_target as STG, hover_align as HA
     Jinv, _mp = STG.load_map()
+    # ★9/10 사용자 지시 "로봇이 밀리잖아 — 이런 일 없도록":
+    #   탐색 이동은 카메라를 관측자세에서 밀어내고, 그 자세로 잰 베이스는 ArUco 자를 못 쓴다
+    #   (9/10 09:42 red_s: 3분 30초 탐색 → 자 미적용 → 베이스가 앞 세 색과 0.8~0.9mm 어긋남).
+    #   실패는 대개 일시적이므로 **움직이기 전에 제자리에서 먼저 다시 본다.**
+    for _t in range(RETRY_IN_PLACE):
+        px4, _w = STG.pillars_px(mask_held=holding)
+        if px4 and len(px4) == 4:
+            if _t:
+                print(f"  (제자리 재시도 {_t + 1}회에 4점 — 로봇 안 움직임)")
+            return px4, (0.0, 0.0)
+        if _t == 0:
+            health_gate()                      # 노출 사다리 — 로봇은 움직이지 않는다
+        time.sleep(0.6)
+
+    # ★★9/10 사용자 철칙: "로봇 밀리는·흔들리는 자세 하지 말아줘".
+    #   탐색 이동은 카메라를 관측자세에서 밀어내고, 그 자리로 잰 베이스는 ArUco 자를 못 써서
+    #   기준이 0.8~0.9mm 어긋난다(9/10 09:42 red_s 실측). 그래서 **기본은 움직이지 않고 멈춘다.**
+    #   정말 필요할 때만 BASE_SEARCH_MOVE=True 로 켠다(그 경우에도 끝나면 관측자세로 돌아온다).
+    if not BASE_SEARCH_MOVE:
+        px_n, _w = STG.pillars_px(n=3, mask_held=holding)
+        raise RuntimeError(
+            f"베이스 기둥 4점 미검출(지금 {len(px_n) if px_n else 0}점) — 로봇을 움직이지 않고 정지했다. "
+            "조명·반사·벽 가림을 확인하고 다시 누를 것(탐색 이동이 필요하면 BASE_SEARCH_MOVE 를 켤 것)")
+
+    _home_needed = False
     for r in range(SEARCH_ROUNDS):
         _c = st()["tcp"]
         if math.hypot(_c[0] - OBS[0], _c[1] - OBS[1]) > SEARCH_MAX_TOTAL_MM:
@@ -522,7 +556,20 @@ def find_base_4pts(holding=False):
             px4, why = STG.pillars_px(mask_held=holding)
             if px4 and len(px4) == 4:
                 if abs(dxy[0]) + abs(dxy[1]) > 0.5:
-                    print(f"  (탐색 결과 카메라 오프셋 Δ ({dxy[0]:+.1f},{dxy[1]:+.1f})mm 반영)")
+                    # ★밀린 자리에서 그대로 쓰지 않는다 — 관측자세로 돌아가 한 번 더 본다.
+                    #   거기서 4점이 잡히면 그 값을 쓴다(Δ0, ArUco 자 적용 가능). 안 잡히면 밀린 값을 쓰되 경고.
+                    print(f"  탐색으로 4점 확보(Δ {dxy[0]:+.1f},{dxy[1]:+.1f}mm) → 관측자세로 복귀해 재측정")
+                    speed(SPD_MOVE); move([OBS[0], OBS[1], OBS[2]] + list(OBS[3:]), tag="관측자세 복귀(재측정)")
+                    time.sleep(0.6)
+                    for _t in range(RETRY_IN_PLACE):
+                        p2, _w2 = STG.pillars_px(mask_held=holding)
+                        if p2 and len(p2) == 4:
+                            print("  ✓ 관측자세에서 4점 재확보 — 밀린 좌표를 쓰지 않는다")
+                            return p2, (0.0, 0.0)
+                        time.sleep(0.6)
+                    print("  ⚠ 관측자세에선 여전히 4점 미달 → 탐색 자리 값 사용(ArUco 자 미적용)")
+                    speed(SPD_MOVE); move([OBS[0] + dxy[0], OBS[1] + dxy[1], OBS[2]] + list(OBS[3:]), tag="탐색 자리 복귀")
+                    time.sleep(0.5)
                 return px4, dxy
         px, why = STG.pillars_px(n=3, mask_held=holding)
         if px and len(px) >= 3:
@@ -530,6 +577,7 @@ def find_base_4pts(holding=False):
             dx, dy = _cam_shift_to_center(c, Jinv)
             print(f"  기둥 {len(px)}점만 보임(중심 px {c[0]:.0f},{c[1]:.0f}) → 카메라 ({dx:+.1f},{dy:+.1f}) 이동해 재탐색 [{r+1}/{SEARCH_ROUNDS}]")
             speed(SPD_MOVE); move([cur[0] + dx, cur[1] + dy, cur[2]] + list(cur[3:]), tag="탐색 XY"); time.sleep(0.5)
+            _home_needed = True
             continue
         # 3점도 안 보임 → 올라가서 넓게 본다
         speed(SPD_MOVE); move([cur[0], cur[1], OBS[2] + LOOK_UP_MM] + list(cur[3:]), tag=f"탐색 상승 z{OBS[2] + LOOK_UP_MM:.0f}"); time.sleep(0.6)
@@ -717,11 +765,14 @@ def run(color, seat=False, do_pick=True, target=None, align=True, len_gate=False
 # ★단일 출처(9/7 17:0x: 같은 이름이 두 군데 있어 앞엣것이 무시되던 것을 정리).
 #   파랑 200 — 랙 위 z465 에서 위쪽 점은 expo167 에 면적 273 이라 하한 500 에 걸려 버려졌고,
 #   그 탓에 늘 '화면 바닥에 잘린 아래쪽 점'만 남아 중심이 흔들렸다.
-HELD_AREA_MIN = {"blue": 200, "yellow": 500, "red": 400, "red_s": 250, "red_in": 250}
+HELD_AREA_MIN = {"blue": 200, "yellow": 500, "red": 400, "red_s": 250, "red_in": 250,
+                 "blue_in": 200, "yellow_in": 150}
 # ★9/7 20:1x 오진 기록: red_in 이 "벽 점 0개"라 x_min 을 740 으로 내렸더니 잡히긴 했는데,
 #   그건 든 벽이 아니라 **베이스 기둥의 빨간 점**(785,522)이었다 — 벽은 이미 떨어져 있었다.
 #   x≥820 은 바로 그 베이스를 배제하려고 있는 값이다. 완화 철회. 색별 예외가 필요하면 여기에만 둔다.
-HELD_X_MIN = {}
+# ★9/10 A타입 내벽(노랑): 든 벽 점이 x≈764 · 면적 ~210 이라 외벽 기준(x≥820 · 면적 250)에 걸린다.
+#   자세가 달라 창이 안 맞는 것이므로 색별로 넓힌다(hover_align.HELD_BOX_BY_COLOR 와 같은 취지).
+HELD_X_MIN = {"yellow_in": 700}
 HELD_NEAR_PX = 90.0
 
 
@@ -752,6 +803,7 @@ def held_wall_dots_expo(color, ladder=(167, 250, 83, 333, 42, 20)):
     for e in ladder:
         try:
             HA.set_expo(e)
+            time.sleep(getattr(HA, 'EXPO_SETTLE_S', 1.4))   # ★9/10: 전환 중 프레임 방지
         except Exception:
             break
         w = held_wall_dots(color)
@@ -821,6 +873,13 @@ JAM_STEP_FAST = 10.0    # 채널 안(중간 구간) 하강 단위(mm)
 JAM_FINE_HEAD = 6       # 처음 이 횟수만큼은 JAM_STEP
 JAM_FINE_TAIL_MM = 15.0 # 안착 z 로부터 이 높이 아래는 다시 JAM_STEP
 
+# ★9/10 사용자 지시: "모든 내벽은 외벽과 다르게 350까지 빨리(속도 15), 340까지 3mm씩 느리게".
+#   내벽은 기둥 사이로 들어가는 게 아니라 밑판 홈에 꽂히므로 외벽의 진입부 서행(JAM_FINE_HEAD 6단계)이 필요없다.
+#   대신 **안착 10mm 전부터**는 3mm·저속으로 바꿔 바닥 접촉을 놓치지 않는다. 막힘 감시는 그대로 켜져 있다.
+INNER_WALLS_DESC = {"red_in", "blue_in", "yellow_in"}
+INNER_FINE_TAIL_MM = 10.0   # 안착 z + 이 높이부터 3mm·저속 (안착 340 → 350 부터)
+INNER_SPD_CHANNEL = 15      # 그 위 구간 속도(%)
+
 
 def descend_monitored(color, x, y, rot, zs, g_close):
     """★막힘 감시 하강(9/5 사고 후 신설). 채널 진입부터 안착까지 JAM_STEP 씩.
@@ -876,9 +935,17 @@ def descend_monitored(color, x, y, rot, zs, g_close):
     d_hist = [0.0]                      # 창 누적용 이력
     z0 = st()["tcp"][2]
     # 15:35·15:57 실기: 두 막힘 모두 'z440→z_seat+60 첫 25mm 무감시 이동' 에서 발생(채널 입구) → 지금 높이에서 바로 JAM_STEP 씩 감시하며 내려간다.
+    _inner = color in INNER_WALLS_DESC
+
     def _step_mm(z_now, n_done):
         # 9/7 사용자 지시: 기둥 진입 안전장치는 예전 그대로 — 처음 JAM_FINE_HEAD 단계는 3mm,
         #   바닥 근처도 3mm, 그 사이 채널 안에서만 10mm. (높이 기준 진입 밴드는 사용자 요청으로 철회)
+        if _inner:
+            # ★내벽: 안착 +INNER_FINE_TAIL_MM 까지 큰 걸음(경계에 정확히 착지) → 그 아래는 3mm
+            h = z_now - zs
+            if h <= INNER_FINE_TAIL_MM:
+                return JAM_STEP
+            return min(JAM_STEP_FAST, h - INNER_FINE_TAIL_MM)
         if n_done < JAM_FINE_HEAD or (z_now - zs) <= JAM_FINE_TAIL_MM + JAM_STEP_FAST:
             return JAM_STEP
         return JAM_STEP_FAST
@@ -886,14 +953,14 @@ def descend_monitored(color, x, y, rot, zs, g_close):
     # ★9/9 사용자 제안: 채널 안 자유 구간(10mm 스텝)만 속도를 올린다. 진입부(처음 JAM_FINE_HEAD)와
     #   안착부(마지막 JAM_FINE_TAIL_MM)는 1% 그대로 — 9/5 기둥 파손도, 오늘 막힘 4건도 전부 진입부(z+73~76)였다.
     #   판정은 정지 상태에서 재므로 속도와 무관하고, 바뀌는 것은 접촉 순간의 관성뿐이다.
-    SPD_CHANNEL = 10
+    SPD_CHANNEL = INNER_SPD_CHANNEL if _inner else 10
     n_step = 0
     z = max(zs, z0 - _step_mm(z0, n_step))
     speed(1)
     _spd_now = 1
     try:
         while True:
-            _want = SPD_CHANNEL if _step_mm(z, n_step) == JAM_STEP_FAST else 1
+            _want = 1 if _step_mm(z, n_step) == JAM_STEP else SPD_CHANNEL
             if _want != _spd_now:
                 speed(_want); _spd_now = _want
                 print(f"    (하강 속도 {_want}% — {'채널 안 자유 구간' if _want > 1 else '진입부/안착부'})")
@@ -1093,7 +1160,7 @@ def _cluster_walls(pts, min_dots=2, x_gap=60.0):
 #   9/7 16:1x 랙 관측 실측(노출 333·500 동일): blue 5점 · yellow 3점 · red 2점 · red_s 2점.
 #   빨강 계열은 가운데 스티커가 검출되지 않는다 → 가운데 점을 강제하면 전 프레임이 버려진다.
 #   따라서 '기대 개수가 잡히면 가운데 점, 아니면 끝점 중점' 으로 물러난다(로그로 어느 쪽을 썼는지 남긴다).
-WALL_DOT_N = {"blue": 5, "yellow": 3, "red": 3, "red_s": 3, "red_in": 3}   # 9/7 18:1x 색 범위 수정 후 빨강 계열도 3점이 안정적으로 잡힘
+WALL_DOT_N = {"blue": 5, "yellow": 3, "red": 3, "red_s": 3, "red_in": 3, "blue_in": 3, "yellow_in": 3}   # 9/7 18:1x 색 범위 수정 후 빨강 계열도 3점이 안정적으로 잡힘
 RACK_FRAG_MERGE_PX = 18.0                  # 랙 색점 조각 합치기 반경(빨강 맨 위 점이 9+29+9 세 조각으로 갈라짐)
 X_WIN_PX = 45.0                            # x_hint 기준 이 안의 점만 그 벽의 것으로 본다(실측 벽 하나의 x 폭 6~10px)
 

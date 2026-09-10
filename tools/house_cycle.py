@@ -102,13 +102,20 @@ PORT = 8776
 OBS = PC.OBS                                    # [200,-330,650,180,0,180]
 SAFE_Z = PC.SAFE_Z                              # 650
 HOVER_Z = PC.HOVER_Z                            # 478
-COLORS = ("blue", "yellow", "red", "red_s", "red_in")   # ★9/7 red_in = 내벽(흰 바탕 빨간 점 3개, 새 랙)
+COLORS = ("blue", "yellow", "red", "red_s", "red_in", "blue_in", "yellow_in")
+# ★9/10 A타입 내벽 = 파랑·노랑 두 장(사용자). B타입 내벽 red_in 과 같은 "내벽 전용 경로"(INNER_WALL_MODE·랙 벽점 검사 시점)를 쓴다.
+INNER_WALLS = {"red_in", "blue_in", "yellow_in"}   # ★9/7 red_in = 내벽(흰 바탕 빨간 점 3개, 새 랙)
 GRIP_OPEN = 30                                  # 사용자 설계: 벌림 30 으로 내려온다
 RACK_RZ_FOLLOW = False                          # 랙 위 벽 각을 rz 로 따라갈지(부호 미검증 → 기본 끔, 각은 보고만)
 # ★9/8 책상이 2mm 올라간 상태. 안착 z 를 바꾸면 정렬 높이(안착+HOVER_DZ)까지 따라 움직여
 #   z440 기준과 어긋나 정렬이 아예 못 돈다 → **하강 정지 높이만** 따로 둔다.
 #   None 이면 평소대로 슬롯 기준의 안착 z 까지 내려간다. 값을 주면 그 높이에서 멈춘다(더 깊이 안 감).
-JAM_FREE = {"red_in"}      # ★막힘 감시 없이 내리는 색(사용자 비접촉 확인). 외벽 4색은 절대 넣지 말 것
+# ★9/10: A타입 내벽(blue_in·yellow_in)은 **넣지 않는다** — 무감시 하강은 9/2 기둥 파손과 같은 조건이고,
+#   자리도 아직 티칭 전이다. red_in 의 무감시는 9/8 WB5500 때 결정된 것이라 그것도 재확인 대상(메모리 🔴).
+# ★9/10 사용자 지시(A): yellow_in 은 벽이 짧아 **든 벽 점이 어느 자세에서도 안 보인다** → 밀림을 볼 수단이 없다.
+#   감시가 원리적으로 불가능하므로 무감시로 내린다. 밑판 접촉 위험은 사용자 확인에 의존.
+#   (blue_in 은 든 벽 점 2개가 보이므로 감시 그대로 켜 둔다)
+JAM_FREE = {"red_in", "yellow_in"}      # ★막힘 감시 없이 내리는 색(사용자 비접촉 확인). 외벽 4색은 절대 넣지 말 것
 DESCEND_STOP_Z = None      # 9/8 14:3x 사용자 확정 안착 z(블루 356) 반영 → 정지 높이 해제
 # ★9/8 17:1x 사용자 지시("하강을 내가 누르니까 목표 z 가면 완료 판정 내고 올라가 — 그래야 풀사이클을 한 번에"):
 #   하강 버튼을 누른 것 자체가 사람의 확인이다. 목표 z 까지 **막힘 없이** 내려갔으면 완료로 보고 그대로 개방·상승한다.
@@ -133,10 +140,11 @@ def set_seat_auto(v):
     jsave(SEAT_AUTO_F, {"auto": on, "made": time.strftime("%Y-%m-%d %H:%M")})
     log(f"══ 안착 판정 불가 자동완료: {'ON(본선 — [계속] 불필요)' if on else 'OFF(티칭 — 벽 문 채 정지)'}")
     return on
-HOVER_DZ = {"red_in": 102.0}   # 안착 z 위로 얼마에서 정렬하나(기본 85.0). red_in=338+102=440 = 기준을 찍은 높이
+HOVER_DZ = {"red_in": 102.0, "blue_in": 100.0, "yellow_in": 100.0}   # 안착 z 위로 얼마에서 정렬하나(기본 85.0). red_in=338+102=440 = 기준을 찍은 높이
 RACK_ANG_MAX = 3.0                              # 랙 위 벽 각 변화 상한(넘으면 벽이 삐뚤게 놓인 것 → 정지)
 ARUCO_WARN_MM, ARUCO_WARN_DEG = 1.5, 0.3        # 고정 자 대비 카메라 복귀 오차 경고
 GRASP_GATE_MM, GRASP_GATE_DEG = PC.GRASP_GATE_MM, 0.7   # 1.0 / 0.7 — 9/6 14시: 파랑 파지 각 +0.43~0.54° 가 4회 연속이고 4회 모두 삽입 성공 → 정상 파지 범위. 0.3 은 서명 촬영 각 편차였음
+GRASP_GATE_BLOCKING = False   # ★9/10 사용자 지시: 파지 편차 초과 시 멈추지 않고 기록만(누를 버튼은 하강 하나)
 PRECORR_MAX_MM = 1.0                            # 파지 편차 선보정 상한(부호 미검증 — 호버 정렬이 나머지를 흡수)
 PRECORR_RZ = False                              # 13:36·14:01 실기 2회: rz 선보정 −0.43° 를 사용자가 매번 정확히 되돌림(rz 180) → 끔
 SEAT_NEWCAM_TOL_PX = 12                         # 새카메라 안착 판정: 기둥 점이 안착 기준 자리에서 이 px 안이면 seated(≈2.5mm)
@@ -145,7 +153,8 @@ ALIGN_GATE_MM, ALIGN_GATE_DEG = 0.5, 0.3        # ②하강 직전 TCP 가 정�
 MIN_EXEC_MM = 0.8                               # 로봇이 실제로 실행하는 최소 이동량(9/1 실증 0.6~1.15) — 그 미만은 1mm 되돌기로
 ALIGN_MAX_AGE_S = 15 * 60                       # ②정렬 완료 후 이 시간이 지나면 하강 거부(베이스가 움직였을 수 있음 → 재정렬)
 SLOT_HISTORY_MAX = 5                            # ③슬롯 기준 승격 시 보존하는 이전 값 개수
-RUN4_ORDER = ("blue", "yellow", "red", "red_s") # ④4벽 연속 순서
+# ★9/10: A타입 6벽 연속 — 외벽 4 → 내벽 2(파랑 먼저). 외벽→내벽 순서는 필수(내벽이 밑판 깊이 검출을 가름).
+RUN4_ORDER = ("blue", "yellow", "red", "red_s", "blue_in", "yellow_in")
 # 13:53 실기 2회: 손목캠↔새카메라 불일치 2.1mm 반복. 사용자 육안 자리와 비교하면 새카메라가 두 번 다 가까웠음(rz 특히).
 #   손목캠은 든 벽 윗점이 프레임 가장자리(x≈1025)라 원근·죠 안 기울기에 민감 → 파랑은 새카메라 단독 정렬(손목캠은 참고 출력).
 ALIGN_SRCS = {"blue": ("newcam",)}                # 색별 정렬 카메라(없으면 가용 전부)
@@ -153,11 +162,48 @@ ALIGN_SRCS = {"blue": ("newcam",)}                # 색별 정렬 카메라(없�
 #   손목캠 기준(13:47)이 삽입 후 밀린 벽 각으로 찍혀 rz +0.5° 편향 → 우선 "measure"(측정·성공 시 승격만) 로 한 사이클 재기준 후 "rz" 로 승격.
 RZ_MEASURE_WARN = 0.6                            # 정렬 중 손목캠이 재는 벽 회전이 이만큼 넘으면 경고(죠 안에서 벽이 돌아감 = 재파지 신호. rz 를 억지로 돌려 맞추지 않는다)
 ALIGN_MAX_MOVE_MM = 4.0    # ★9/7: 정렬이 슬롯 기준에서 이만큼 넘게 옮기면 정지 — 든 벽 점(가까움)과 기둥(멀리)의 시차로 파지 오차가 2배 증폭되는 구조라, 큰 이동은 신뢰할 수 없다(재파지가 답)
-ALIGN_ROLES = {"blue":   {"newcam": "xy", "wrist": "measure"},   # ★rz 고정 모드: rz 담당 없음 → 정렬은 XY 만, rz 는 운반의 절대 명령값 그대로
-               "yellow": {"wrist": "xy"},                        # 9/6 19:28 실측: 노랑 자리(rz90)에선 새카메라가 든 벽을 전혀 못 봄 → 손목캠 단독 XY. rz 담당 없음 = rz 고정
-               "red":    {"newcam": "xy"},                       # 9/6 20:37 실측: 빨강 자리에선 손목캠이 기둥 1개만 봄(기준 생성 불가), 새카메라는 벽점1+기둥4 → 새카메라 단독 XY(rz 고정)
-               "red_s":  {"wrist": "xy"},
-               "red_in": {"wrist": "xy"}}   # 9/7 신설 — 자리 확인 전 임시(손목캠). z440 에서 어느 캠이 보는지 실측 후 정정                        # 9/7 11:00 실측: red_s 자리에서 손목캠이 기둥 4개(파랑3·노랑1)+든 벽 점을 안정적으로 봄. 새카메라는 벽이 화면 위끝, 측면캠 0개. (9/6 설계 메모의 "손목캠 못 봄"은 반증됨)
+# ★9/10 사용자 지시: 파랑도 두 캠 조종으로. 새카메라 단독이던 19:07 에 혼자 4.4mm 를 끌고 가
+#   (wrist +3.28 vs newcam +5.07mm 로 2mm 갈렸는데 막을 게 없었다) 기둥을 시야 밖으로 밀어냈다.
+#   둘 다 xy 면 COMBINE_TOL_MM(1.5mm) 불일치 게이트가 걸린다 — red_s 에서 실제로 잘못된 이동을 막았다.
+# ★9/10: 집 타입마다 카메라 사정이 다르다(밑판 자리·기둥 가림). 오늘 A타입에 맞춰 바꾼 값을
+#   B타입에 그대로 물리면 검증 안 된 설정으로 도는 셈이라 타입별로 나눈다.
+_ROLES_A = {"blue":   {"newcam": "xy", "wrist": "xy"},     # 9/10 저녁: 각 캠 기둥 1점 지정 후 두 캠 조종(검증 0.030mm)
+            "yellow": {"wrist": "xy", "newcam": "measure"},# 벽 옆면 빨간 점 = 파지 이상 감지기
+            "red":    {"wrist": "xy", "newcam": "xy"},     # 9/10 저녁: 두 캠 조종(검증 0.043mm)
+            "red_s":  {"wrist": "xy", "newcam": "measure"},# 옆면 노란 점은 높이↔가로 혼동이 있어 조종 금지
+            "red_in": {"wrist": "xy"},
+            "blue_in": {"wrist": "xy"},                    # 새카메라 안 씀(사용자). 밑판 노랑 3점 + 든 벽 2점
+            "yellow_in": {"wrist": "xy"}}                  # 밑판 기준 모드(든 벽 점 없음)
+# ★9/10 밤 사용자 지시 "A 성공한 방식으로 바꾸자": B타입도 두 캠 조종으로.
+#   A타입에서 통한 조합 = **각 카메라에 진짜 밑판 기둥 1점 지정 + 두 캠이 서로 검증**.
+#   한쪽만 조종하면 그 기준이 낡아도 막을 게 없다(21:04 B파랑: 새카메라 단독으로 6mm 끌고 가 기둥에 박힘).
+#   기준이 둘 다 있는 색만 두 캠으로 두고, 새카메라 기준이 없는 색은 손목캠 단독 유지.
+_ROLES_B = {"blue":   {"newcam": "xy", "wrist": "xy"},     # 9/10 밤 재취득, 검증 0.030mm
+            "yellow": {"wrist": "xy", "newcam": "xy"},   # 9/10 밤 재취득(옆면 빨간 점), 검증 0.132mm
+            "red":    {"newcam": "xy", "wrist": "xy"},     # 둘 다 기준 있음(9/8~9/9, 차례에 재취득 필요)
+            "red_s":  {"wrist": "xy"},                     # 새카메라 기준 없음(side 만 있음)
+            "red_in": {"wrist": "xy"}}
+
+
+class _RolesByHouse(dict):
+    """ALIGN_ROLES.get(color) 를 그대로 쓰되, 지금 집 타입에 맞는 표를 본다."""
+    def _t(self):
+        return _ROLES_B if house_type() == "b" else _ROLES_A
+    def get(self, k, d=None):   return self._t().get(k, d)
+    def __getitem__(self, k):   return self._t()[k]
+    def __contains__(self, k):  return k in self._t()
+    def keys(self):             return self._t().keys()
+    def items(self):            return self._t().items()
+
+
+ALIGN_ROLES = _RolesByHouse()
+
+# 파지 편차 게이트도 타입별 — A는 사용자 지시로 비차단, B는 검증된 예전 동작(정지) 유지
+def grasp_gate_blocking():
+    # ★9/10 밤: A타입에서 비차단으로 두고 6벽을 완주했다(안전망은 정렬 4mm·두 캠 1.5mm·막힘 감시).
+    #   사용자 지시로 B타입도 같게 — 누를 버튼은 하강 하나.
+    return False
+
 # 정렬 수렴 후 사용자 조그 4회(14:33·14:51·15:31·15:57): dx −0.89/−0.04/−1.00/−0.99, dy −2.18/−1.02/−2.03/−2.50, drz +0.32/+0.88/+0.93/+0.65
 #   → 부호가 전부 같고 크기도 비슷 → 사용자 지시("일률적이면 보정값") 대로 정렬 뒤 고정 보정(로봇 프레임, rz≈180 기준). nudge_log 로 잔차 계속 감시.
 POST_ALIGN_OFFSET = {"blue": (0.0, 0.0, 0.0)}   # ★9/7 18:5x 빨강 −0.5mm 철회: 최소 실행 이동량(0.8mm)보다 작아
@@ -412,7 +458,11 @@ def stage_base(color=None):
     # ★9/7 21:1x 사용자 지시("내벽은 외벽 다 끝나고 넣을 거니까 그때만 키게 해"):
     #   내벽이 밑판 윗면을 가로질러 두 칸으로 끊는 문제 대응은 **red_in 사이클에서만** 켠다.
     #   외벽 4색은 이 값이 항상 False 라 base_depth_corner 의 예전 경로를 그대로 탄다.
-    BDC.INNER_WALL_MODE = (color == "red_in")
+    # ★9/10 실측으로 정정: 이 보정은 "내벽 색을 나르는 중"이 아니라 **내벽이 실제로 밑판에 꽂혀 있을 때** 필요하다.
+    #   내벽은 마지막에 꽂으므로 자기 사이클의 베이스 측정 시점엔 아직 랙에 있다 → 켜면 없는 내벽을 있다고 보고
+    #   밑판 조각을 합치려다 사각형이 깨진다(실측: OFF 4/4 검출 / ON 은 전 노출·게인에서 최고 1/4).
+    #   → 평소대로 끄고 재고, **모자랄 때만** 내벽 모드로 한 번 더 본다(내벽 색에서만 — 외벽은 내벽보다 먼저 꽂으므로 만날 일이 없다).
+    BDC.INNER_WALL_MODE = False
     check_wb()
     """관측자세 z650 빈 손 → 기둥 4점(탐색 포함) → ArUco 보정 → 베이스 자세(로컬 로봇축 mm, 원점=관측 화면중심)."""
     set_stage("1 BASE")
@@ -420,7 +470,19 @@ def stage_base(color=None):
     if max(abs(cur[i] - OBS[i]) for i in range(3)) > 2.0:
         goto_obs()
     Jinv, _mp = STG.load_map()
-    px4, dxy = PC.find_base_4pts(False)                       # 부품(건강게이트·노출사다리·탐색 이동 포함)
+    try:
+        px4, dxy = PC.find_base_4pts(False)                   # 부품(건강게이트·노출사다리·탐색 이동 포함)
+    except Exception as _e_out:
+        if color not in INNER_WALLS:
+            raise
+        log(f"  기둥 검출 실패({_e_out}) → 내벽이 이미 꽂힌 경우로 보고 INNER_WALL_MODE 로 재시도")
+        BDC.INNER_WALL_MODE = True
+        try:
+            px4, dxy = PC.find_base_4pts(False)
+            log("  ✓ 내벽 모드에서 검출 성공(밑판이 내벽으로 갈려 있었음)")
+        except Exception:
+            BDC.INNER_WALL_MODE = False
+            raise _e_out                                       # 원래 사유로 보고한다
     info = {"applied": False, "why": "탐색 이동으로 카메라가 관측자세를 벗어남 → 자 미적용"}
     if abs(dxy[0]) + abs(dxy[1]) < 0.5:
         px4, info = aruco_correct(px4)
@@ -522,7 +584,7 @@ def stage_rack(color, teach_rack=False):
     # ★9/7 21:1x 사용자 지시("내벽하고 외벽 조건 따로 써"): 외벽 4색은 예전 그대로 **사이클 맨 앞**에서 검사한다.
     #   내벽(red_in)만 랙 SAFE 도착 후(=그리퍼 여는 순간 직전)에 검사한다 — 맨 앞에서 보면 로봇이 베이스 위에
     #   서 있을 때 기둥 빨간 점(785,522)을 '든 벽'으로 오인해 헛정지하기 때문(20:36 실측).
-    if color != "red_in" and PC.held_wall_dots_expo(color):
+    if color not in INNER_WALLS and PC.held_wall_dots_expo(color):
         raise Gate("그리퍼에 벽이 이미 있습니다 — 랙으로 가면 여기서 열어 떨어뜨립니다. "
                    "벽을 먼저 내려놓거나 [▶ 든 채로 3단계부터] 로 진행하세요")
     rr = (jload(F["rack"]) or {}).get(color)
@@ -535,7 +597,7 @@ def stage_rack(color, teach_rack=False):
     # ★9/7 사고: 벽을 문 채 사이클을 시작하면 여기서 그리퍼를 열어 벽을 떨어뜨린다 → 열기 직전에 확인.
     #   ★20:1x: 이 검사를 사이클 맨 앞에서 하면 로봇이 베이스 위에 서 있을 때 기둥 빨간 점(785,522)을
     #   "든 벽"으로 오인해 헛정지한다. 랙 SAFE 로 온 뒤(베이스가 화면 밖) 여는 순간 직전에 본다.
-    if color == "red_in" and PC.held_wall_dots_expo(color):
+    if color in INNER_WALLS and PC.held_wall_dots_expo(color):
         raise Gate("그리퍼에 벽이 이미 있습니다 — 여기서 열면 떨어집니다. "
                    "벽을 먼저 내려놓거나 [▶ 든 채로 3단계부터] 로 진행하세요")
     log(f"  그리퍼 열기 → {PC.gripper(rr.get('grip_open', GRIP_OPEN))}")
@@ -650,7 +712,17 @@ def stage_rack(color, teach_rack=False):
     return grasp_check(color, dang, g_close, gr)
 
 
+# ★9/10 사용자 지시: "yellow_in 은 벽이 짧아 들어올린 자세에서 점이 안 보인다. 그냥 잡으면 잘 잡은 것이니 검사하지 마라."
+#   랙 들어올림 자세(z453)에서 든 벽 점이 0개라 서명 촬영도 편차 측정도 원리적으로 불가능하다.
+#   → 이 색은 파지 편차 게이트를 건너뛴다(선보정 없음). 그리퍼 실측 > 닫힘값 검사는 그대로 살아 있고,
+#     **슬롯 자리(z440)에서는 점 2개가 보이므로 호버 정렬·막힘 감시는 정상 작동한다.**
+NO_GRASP_SIG = {"yellow_in"}
+
+
 def grasp_check(color, rack_dang, g_close, gr):
+    if color in NO_GRASP_SIG:
+        log(f"  (파지 편차 검사 생략 [{color}] — 짧은 벽이라 들어올린 자세에서 점이 안 보임. 선보정 없음)")
+        return None
     # ★9/7 실측: 같은 파지·같은 자세에서 노출만 바꿔도 든 벽 점 중심이 12.8px(≈2.5mm) 움직인다(면적 541↔1733).
     #   서명을 찍은 노출과 다른 노출에서 재면 '가짜 파지 편차'가 나온다 → 서명 노출로 맞추고 잰다.
     try:
@@ -681,8 +753,14 @@ def grasp_check(color, rack_dang, g_close, gr):
     if abs(info["along_mm"]) > GRASP_GATE_MM or abs(info["across_mm"]) > GRASP_GATE_MM or abs(info["dang"]) > GRASP_GATE_DEG:
         # 13:27 실기: 위치 −0.1mm 인데 각 +0.44° 로 정지(랙 위 벽이 −0.55° 돌아 있고 파지 rz 180 고정). z440 정렬이 회전을 보정하므로
         # 즉시 정지 대신 사용자 선택: [▶계속]=이 파지로 진행(z440 에서 보정) / [⛔중단]=정지(벽은 사용자가 랙으로).
-        wait_user(f"파지 편차 게이트 초과({GRASP_GATE_MM}mm/{GRASP_GATE_DEG}°): 가로 {info['across_mm']:+.2f} 길이 {info['along_mm']:+.2f}mm 각 {info['dang']:+.2f}° — "
-                  f"[▶계속]=이 파지로 진행(z440 정렬이 보정) / [⛔중단]=정지 후 재파지")
+        # ★9/10 사용자 지시: "다음 사이클부터 내가 누를 버튼은 하강뿐이어야 한다."
+        #   파지 편차는 **선보정 + z440 정렬**이 고치는 값이라 여기서 사람을 세울 이유가 없다.
+        #   진짜 위험은 뒤의 세 안전망이 잡는다: ①정렬 온전성 4mm ②두 캠 불일치 1.5mm ③막힘 감시.
+        if grasp_gate_blocking():
+            wait_user(f"파지 편차 게이트 초과({GRASP_GATE_MM}mm/{GRASP_GATE_DEG}°): 가로 {info['across_mm']:+.2f} 길이 {info['along_mm']:+.2f}mm 각 {info['dang']:+.2f}° — "
+                      f"[▶계속]=이 파지로 진행(z440 정렬이 보정) / [⛔중단]=정지 후 재파지")
+        else:
+            log(f"  ⚠ 파지 편차 게이트 초과({GRASP_GATE_MM}mm/{GRASP_GATE_DEG}°) — 기록만 하고 진행(정렬이 보정)")
         G["gate_override"] = True
     return G
 
@@ -935,6 +1013,18 @@ def stage_descend(color):
     T, A, cur = descend_gate(color)
     set_stage("3 DESCEND", color=color)
     rr = (jload(F["rack"]) or {}).get(color) or {}
+    # ★9/10 사고: 슬롯 기준 파일의 안착 z 를 고쳤는데 **돌고 있던 사이클이 메모리의 옛 값(z440)을 들고 있어**
+    #   z440 에서 "안착 z 도달"로 판정하고 그리퍼를 열어 벽을 85mm 위에서 떨어뜨렸다.
+    #   → 하강 직전에 **파일에서 다시 읽고**, 지금 높이와 너무 가까우면(=내려갈 거리가 없으면) 거부한다.
+    _ref = (jload(F["slot"]) or {}).get(color) or {}
+    _zs_file = (_ref.get("seat_tcp") or [None, None, None])[2]
+    if _zs_file is not None and abs(_zs_file - T["z_seat"]) > 0.5:
+        log(f"  ⚠ 안착 z 갱신: 메모리 {T['z_seat']:.2f} → 파일 {_zs_file:.2f} (사이클 중 슬롯 기준이 바뀜)")
+        T["z_seat"] = float(_zs_file)
+    z_now = PC.st()["tcp"][2]
+    if z_now - T["z_seat"] < 20.0:
+        raise Gate(f"안착 z {T['z_seat']:.1f} 가 지금 높이 z{z_now:.1f} 와 {z_now - T['z_seat']:.1f}mm 밖에 차이 안 남 — "
+                   f"슬롯 기준의 안착 z 가 잘못됐을 수 있다(하강 거부). slot_ref 확인 필요")
     z_tgt = T["z_seat"]
     if DESCEND_STOP_Z is not None and DESCEND_STOP_Z > z_tgt:
         log(f"  ⚠ 하강 정지 높이 z{DESCEND_STOP_Z:.0f} 적용 — 안착 z{z_tgt:.0f} 까지 내려가지 않는다(사용자 확인용)")
@@ -1025,7 +1115,7 @@ def stage_descend_reteach(color):
     promote_seat_ref(color)
     _pending_seat[color] = list(seat_tcp); jsave(_PENDING_F, _pending_seat)
     set_stage("3' RETEACH z440", color=color)
-    zh = T["z_seat"] + 85.0
+    zh = T["z_seat"] + HOVER_DZ.get(color, 85.0)   # ★9/10: 85 고정 → 색별 정렬 높이
     PC.speed(SPD_SEAT); move([at[0], at[1], zh] + list(at[3:]), tag=f"든 채 z{zh:.0f} (기준 재촬영)")
     time.sleep(0.8)
     for src in ("wrist", "newcam"):
@@ -1069,7 +1159,11 @@ def run_held(color):
     필요: 이번 사이클 베이스(base_last, 20분 이내) + 파지 편차(메모리 S 또는 재시작 전 저장한 last_state) + 그리퍼가 벽을 물고 있음."""
     with LOCK:
         G = S.get("grasp"); S.update(color=color, err=None, target=None, align=None, seat=None)
-    if not G:
+    if color in NO_GRASP_SIG:
+        # ★9/10: 짧은 벽이라 들어올린 자세에서 점이 안 보인다 → 편차를 잴 수 없다. 선보정 없이 진행(사용자 지시).
+        G = None
+        log(f"  (파지 편차 생략 [{color}] — 짧은 벽, 선보정 없음)")
+    elif not G:
         # 9/7 사고: 서버 재시작으로 이번 파지 기록이 비면 어제 파랑 스냅샷(2점)을 물려받아 red_s 에 엉뚱한 선보정이 들어갔다.
         #   같은 색·같은 방식일 때만 재사용하고, 아니면 지금 다시 잰다.
         ls = jload(os.path.join(STATE, "last_state_1327.json")) or {}
@@ -1087,7 +1181,7 @@ def run_held(color):
             G = {"ok": True, "across_mm": info2["across_mm"], "along_mm": info2["along_mm"],
                  "dang": info2["dang"], "how": info2["how"], "grip": PC.grip_read()}
             log(f"  파지 편차 재측정({G['how']}): 가로 {G['across_mm']:+.2f} 길이 {G['along_mm']:+.2f}mm 각 {G['dang']:+.2f}°")
-    if not G:
+    if not G and color not in NO_GRASP_SIG:
         raise Gate("파지 편차 기록 없음 — [▶사이클] 로 처음부터")
     B = jload(F["base_last"])
     if not B:
@@ -1100,14 +1194,54 @@ def run_held(color):
     if g.isdigit() and int(g) <= rr.get("grip_close", 13):
         # 9/7: red_s 는 얇아 물어도 그리퍼 값이 닫힘값 그대로(8→8) — 손목캠 든 벽 점으로 확인(descend_monitored 와 같은 규칙)
         w = PC.held_wall_dots_expo(color)
-        if not w:
+        if not w and color not in NO_GRASP_SIG:
             raise Gate(f"그리퍼 {g} ≤ 닫힘값 + 손목캠 든 벽 점 0 — 벽을 물고 있지 않음")
-        log(f"  (그리퍼 {g} = 닫힘값이지만 손목캠 든 벽 점 {len(w)}개 → 물고 있음)")
+        if not w:
+            # ★9/10 사용자 지시: 짧은 벽은 들어올린 자세에서 점이 원리적으로 안 보인다 → 이 확인을 못 한다.
+            log(f"  ⚠ [{color}] 파지 확인 불가(그리퍼 {g} = 닫힘값, 든 벽 점 0) — 짧은 벽이라 검사 생략, 사용자 확인에 의존")
+        else:
+            log(f"  (그리퍼 {g} = 닫힘값이지만 손목캠 든 벽 점 {len(w)}개 → 물고 있음)")
     with LOCK: S["base"] = B; S["grasp"] = G
-    log(f"══ 든 채로 3단계부터 [{color}]: 베이스 {B['made']} 파지 편차 가로 {G['across_mm']:+.2f} 길이 {G['along_mm']:+.2f} 각 {G['dang']:+.2f}°")
+    if G:
+        log(f"══ 든 채로 3단계부터 [{color}]: 베이스 {B['made']} 파지 편차 가로 {G['across_mm']:+.2f} 길이 {G['along_mm']:+.2f} 각 {G['dang']:+.2f}°")
+    else:
+        log(f"══ 든 채로 3단계부터 [{color}]: 베이스 {B['made']} (파지 편차 생략)")
     T = slot_target(color, B, G)
     stage_carry_hover(color, T)
     set_stage("WAIT DESCEND", wait="[⬇ 하강] 버튼 (x·y·yaw 확인 후)", color=color)
+
+
+def goto_calc_target(color):
+    """★9/10 기준 재촬영용 — 정렬이 옮긴 자리에서 '계산 목표'(슬롯 기준 + 지금 베이스) XY 로 되돌린다.
+
+    호버 기준을 **정렬 편향이 섞인 자리**가 아니라 **정답 자리**에서 찍기 위한 것.
+    (red_s 는 기준을 빈 베이스에서 찍어 매 사이클 dy +2.1mm 로 끌려갔다 → 편향을 구조적으로 0 으로.)
+    z·rz·그리퍼는 건드리지 않는다. 벽은 아직 공중이라 베이스에 닿을 위험이 없다."""
+    with LOCK:
+        T = S.get("target"); col = S.get("color")
+    if not T or T.get("x") is None:
+        raise Gate("계산 목표 없음 — 사이클이 WAIT DESCEND 인 상태에서만 쓴다")
+    if col != color:
+        raise Gate(f"색 불일치: 정렬된 벽은 {col}, 요청은 {color}")
+    cur = PC.st()["tcp"]
+    zh = T["z_seat"] + HOVER_DZ.get(color, 85.0)
+    if abs(cur[2] - zh) > 3.0:
+        raise Gate(f"지금 z{cur[2]:.0f} 가 정렬 높이 z{zh:.0f}±3 밖 — 호버에서만")
+    d = math.hypot(cur[0] - T["x"], cur[1] - T["y"])
+    if d > 8.0:
+        raise Gate(f"계산 목표까지 {d:.1f}mm — 너무 멀다(8mm 상한), 사이클 다시")
+    set_stage("→ 계산 목표", color=color)
+    log(f"  계산 목표 복귀: ({cur[0]:.2f},{cur[1]:.2f}) → ({T['x']:.2f},{T['y']:.2f})  Δ {d:.2f}mm")
+    PC.speed(SPD_SEAT)
+    move([T["x"], T["y"], cur[2], cur[3], cur[4], cur[5]], tag="계산 목표 복귀")
+    at = PC.st()["tcp"]
+    log(f"  ✓ 복귀 TCP ({at[0]:.2f},{at[1]:.2f}) 잔차 {math.hypot(at[0]-T['x'], at[1]-T['y']):.2f}mm "
+        f"— 이 자리에서 [z440 기준 저장] 후 하강")
+    with LOCK:
+        A = S.get("align")
+        if A:
+            A.update(x=at[0], y=at[1], rz=at[5], by="calc_target")
+    set_stage("WAIT DESCEND (계산 목표 복귀)", color=color)
 
 
 def align_here(color):
@@ -1115,7 +1249,7 @@ def align_here(color):
     ref = (jload(F["slot"]) or {}).get(color)
     if not ref:
         raise Gate(f"{color} 슬롯 기준 없음")
-    zs = ref["seat_tcp"][2]; zh = zs + 85.0
+    zs = ref["seat_tcp"][2]; zh = zs + HOVER_DZ.get(color, 85.0)   # ★9/10: 85 고정 → 색별 정렬 높이(내벽 100)
     cur = PC.st()["tcp"]
     if abs(cur[2] - zh) > 12.0:
         raise Gate(f"지금 z{cur[2]:.0f} — z{zh:.0f}±12 에서만(든 채)")
@@ -1123,8 +1257,11 @@ def align_here(color):
     if g.isdigit() and int(g) <= rr.get("grip_close", 13):
         # 9/7: red_s 는 얇아 물어도 그리퍼 값이 닫힘값 그대로(8→8) — 손목캠 든 벽 점으로 확인
         if not PC.held_wall_dots_expo(color):
-            raise Gate(f"그리퍼 {g} ≤ 닫힘값 + 손목캠 든 벽 점 0 — 벽을 물고 있지 않음")
-        log(f"  (그리퍼 {g} = 닫힘값이지만 손목캠 든 벽 점 있음 → 물고 있음)")
+            if color not in NO_GRASP_SIG:
+                raise Gate(f"그리퍼 {g} ≤ 닫힘값 + 손목캠 든 벽 점 0 — 벽을 물고 있지 않음")
+            log(f"  ⚠ [{color}] 파지 확인 불가 — 짧은 벽이라 검사 생략, 사용자 확인에 의존")
+        else:
+            log(f"  (그리퍼 {g} = 닫힘값이지만 손목캠 든 벽 점 있음 → 물고 있음)")
     with LOCK:
         S.update(color=color, err=None, align=None, seat=None)
         if not S.get("target"):
@@ -1215,7 +1352,9 @@ def teach_slot_both(color):
     gc = ((jload(F["rack"]) or {}).get(color) or {}).get("grip_close", 13)
     g = PC.grip_read()
     if g.isdigit() and int(g) <= gc:
-        raise Gate(f"슬롯 기준 1/2 거부: 그리퍼 {g} ≤ 닫힘값 {gc} — 벽을 물고 있지 않음(빈손)")
+        if color not in NO_GRASP_SIG:
+            raise Gate(f"슬롯 기준 1/2 거부: 그리퍼 {g} ≤ 닫힘값 {gc} — 벽을 물고 있지 않음(빈손)")
+        log(f"  ⚠ [{color}] 파지 확인 불가(그리퍼 {g} = 닫힘값) — 짧은 벽이라 검사 생략, 사용자 확인에 의존")
     if not PC.held_wall_dots_expo(color):
         raise Gate(f"슬롯 기준 1/2 거부: 손목캠에 든 {color} 벽 점 0 — 벽을 물고 있어야 함(빈손)")
     teach_slot_tcp(color)
@@ -1262,6 +1401,7 @@ def fixed_cam_seeds(src, color):
     없으면 최대 점이 2위의 2배 이상일 때만 채택. 애매하면 후보 목록과 함께 거부(사용자가 hover_view 로 확인)."""
     img = HA.grab(src)
     d = HA.DET[src]
+    color = HA.wall_color(color, src)          # ★9/10: (색,카메라)별 벽 점 색 예외 — red_s+새카메라 = 옆면 노랑 점
     pts = sorted([q for q in HA._blobs(img, color, d["amin_wall"], src) if q[2] >= d["amin_wall"]], key=lambda q: -q[2])
     if not pts:
         raise Gate(f"{src} 에 {color} 점이 하나도 없음(벽 든 채 z440 이어야 함)")
@@ -1275,6 +1415,39 @@ def fixed_cam_seeds(src, color):
     seeds = [(float(q[0]), float(q[1])) for q in pick]
     log(f"  {src} 든 {color} 벽 점 씨앗 {[(round(x), round(y)) for x, y in seeds]} 면적 {[int(q[2]) for q in pick]} (후보 {len(pts)})")
     return seeds
+
+
+def teach_hover_all(color):
+    """★9/10 사용자 지시: "사진 찍으라 할 때 한꺼번에 다 찍어라."
+    오늘 문제의 상당수가 **손목캠과 새카메라를 다른 시각·다른 자리에서 찍어서** 생겼다
+    (red_s: 손목 20:00 / 새카메라 16:34 → 1.8mm, 다시 0.9mm 차이로 1.67mm 불일치).
+    로봇을 움직이지 않고 지금 자리에서 두 카메라를 연속 저장한 뒤, 곧바로 검증해서 불일치를 보고한다."""
+    t0 = PC.st()["tcp"]
+    log(f"── 기준 일괄 촬영 [{color}] @ ({t0[0]:.2f},{t0[1]:.2f},{t0[2]:.1f}) rz{t0[5]:+.2f}")
+    done, fail = [], []
+    for src in ("wrist", "newcam"):
+        try:
+            teach_hover(color, src); done.append(src)
+        except Exception as ex:
+            fail.append(src); log(f"  ⚠ [{src}] 실패: {ex}")
+    t1 = PC.st()["tcp"]
+    if max(abs(t1[i] - t0[i]) for i in range(3)) > 0.2:
+        log(f"  ⚠ 촬영 중 로봇이 움직였다({t0[:2]} → {t1[:2]}) — 두 기준이 다른 자리가 됐을 수 있다")
+    if not done:
+        raise Gate(f"기준 일괄 촬영 실패({', '.join(fail)})")
+    # 저장 직후 자기검증
+    try:
+        HA.check.expo_done = False
+        C, per, why = HA.check(color, srcs=done, roles={s: "xy" for s in done})
+        for s, m in (per or {}).items():
+            log(f"  검증 [{s}] Δ ({m['dmm'][0]:+.3f},{m['dmm'][1]:+.3f})mm rms {m['sim']['rms']:.1f}px")
+        if per and len(per) == 2:
+            a, b = per[done[0]]["dmm"], per[done[1]]["dmm"]
+            dd = math.hypot(a[0] - b[0], a[1] - b[1])
+            log(f"  ★ 두 카메라 불일치 {dd:.3f}mm " + ("✅" if dd <= 0.5 else f"⚠ (게이트 {HA.COMBINE_TOL_MM}mm)"))
+    except Exception as ex:
+        log(f"  (검증 실패: {ex})")
+    log(f"✅ 기준 일괄 촬영 [{color}] 완료: {', '.join(done)}" + (f" · 실패 {', '.join(fail)}" if fail else ""))
 
 
 def teach_hover(color, src="wrist"):
@@ -1337,6 +1510,7 @@ def worker():
             if op == "start": run_cycle(arg["color"], arg.get("teach_rack", False))
             elif op == "resume_held": run_held(arg["color"])
             elif op == "align_here": align_here(arg["color"])
+            elif op == "to_target": goto_calc_target(arg["color"])
             elif op == "descend": stage_descend(arg["color"])
             elif op == "descend_reteach": stage_descend_reteach(arg["color"])
             elif op == "goto_obs": set_stage("GOTO OBS"); goto_obs(); set_stage("IDLE")
@@ -1378,7 +1552,7 @@ def handle_cmd(q):
         r4 = S.get("run4"); in_run4_wait = bool(r4 and r4.get("active") and S.get("stage") == "WAIT DESCEND" and S.get("wait"))
     if op == "descend" and in_run4_wait:                             # ④run4 는 워커가 점유 중 → 하강 버튼 = 계속
         RESUME.set(); return {"ok": True, "note": "run4: 하강 진행"}
-    if op in ("start", "descend", "goto_obs", "slot2", "probe", "run4", "slot_both", "resume_held", "descend_reteach", "align_here", "lift"):
+    if op in ("start", "descend", "goto_obs", "slot2", "probe", "run4", "slot_both", "resume_held", "descend_reteach", "align_here", "to_target", "lift"):
         if S["busy"]:
             return {"ok": False, "err": "실행 중 — 먼저 중단"}
         order = [c for c in (q.get("order", [""])[0] or "").split(",") if c] or list(RUN4_ORDER)
@@ -1392,6 +1566,7 @@ def handle_cmd(q):
         elif op == "rack_offset": teach_rack_offset(color)
         elif op == "sig": teach_grasp_sig(color)
         elif op == "hover_ref": teach_hover(color, src)
+        elif op == "hover_all": teach_hover_all(color)
         else: return {"ok": False, "err": f"op {op}?"}
         return {"ok": True}
     except Exception as ex:
@@ -1455,11 +1630,12 @@ pre{background:#000;padding:8px;height:340px;overflow:auto;font-size:24px;line-h
 .card{display:inline-block;vertical-align:top;background:#1c1c1c;padding:8px;margin:4px;border-radius:6px;min-width:260px}</style>
 <h2>HOUSE CYCLE <small id=tcp></small></h2>
 <div class=st>단계: <b id=stage>-</b> <span id=wait class=wait></span></div>
-<div>색: <select id=color onchange="try{localStorage.setItem('hc_color',this.value)}catch(e){}"><option>blue<option>yellow<option>red<option>red_s<option>red_in</select>
+<div>색: <select id=color onchange="try{localStorage.setItem('hc_color',this.value)}catch(e){}"><option>blue<option>yellow<option>red<option>red_s<option>red_in<option>blue_in<option>yellow_in</select>
  <button class="big run" onclick="cmd('start')">▶ 사이클(1→2→2')</button>
  <button class="run" onclick="cmd('start',{teach:1})">▶ 사이클 + 랙 파지 티칭</button>
  <button class="run" onclick="cmd('resume_held')">▶ 든 채로 3단계부터(운반→z440 정렬→하강 대기)</button>
  <button class="run" onclick="cmd('align_here')">▶ 여기서 정렬만 다시(z440, 든 채)</button>
+ <button class="teach" onclick="cmd('to_target')">◎ 계산 목표로 복귀(기준 재촬영용)</button>
  <button class="big run" onclick="if(confirm('4벽 연속 blue→yellow→red→red_s? 벽마다 빈손 베이스 재측정, 하강은 매번 [⬇ 하강] 버튼'))cmd('run4')">▶ 4벽 연속(run4)</button>
  <button class="big run" onclick="if(confirm('출하 리프트? 집에 포크 손잡이 끼워져 있고 출하지(-700,-100) 비었나. 로봇은 빈손·z440 이상'))cmd('lift')">🏠 리프트(출하)</button>
  <button class="big down" id=desc onclick="if(confirm('수직 하강? x·y·yaw 확인했나'))cmd('descend')">⬇ 하강(3)</button>
@@ -1471,6 +1647,7 @@ pre{background:#000;padding:8px;height:340px;overflow:auto;font-size:24px;line-h
  <button class="teach" onclick="cmd('slot_both')">슬롯 기준 1/2+2/2 한 버튼 (물고 저장 → 놓고 ▶계속 → 측정)</button><br>
  <button class="teach" onclick="cmd('slot1')">슬롯 기준 1/2 (안착 TCP)</button> <button class="teach" onclick="cmd('slot2')">슬롯 기준 2/2 (관측 페어링)</button><br>
  <button class="teach" onclick="cmd('rack_offset')">랙 보정 저장</button> <button class="teach" onclick="cmd('sig')">좋은 파지 서명 저장</button><br>
+ <button class="teach" onclick="cmd('hover_all')">◎ z440 기준 일괄 저장(두 캠 동시+검증)</button>
  <button class="teach" onclick="cmd('hover_ref',{src:'wrist'})">z440 기준 저장(손목)</button>
  <button class="teach" onclick="cmd('hover_ref',{src:'newcam'})">(새카메라)</button> <button class="teach" onclick="cmd('hover_ref',{src:'side'})">(측면)</button><br>
  <button class="probe" onclick="cmd('probe',{src:'newcam'})">고정캠 매핑: 새카메라</button> <button class="probe" onclick="cmd('probe',{src:'side'})">측면캠</button></div>
