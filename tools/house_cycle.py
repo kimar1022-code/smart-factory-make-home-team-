@@ -199,6 +199,19 @@ class _RolesByHouse(dict):
 ALIGN_ROLES = _RolesByHouse()
 
 # 파지 편차 게이트도 타입별 — A는 사용자 지시로 비차단, B는 검증된 예전 동작(정지) 유지
+def apply_speed_profile():
+    """★9/11 사용자 지시: A타입은 저속 2%·외벽 채널 15%·SAFE 이동 35%. B타입은 9/1 동결값(1/10/30).
+    하강(descend_monitored) 직전과 이동 전에 호출해 place_calc 의 조절 변수를 집 타입에 맞춘다."""
+    a = house_type() == "a"
+    PC.SPD_SLOW = 2 if a else 1
+    PC.SPD_CHANNEL_OUTER = 15 if a else 10
+    return 35 if a else PC.SPD_MOVE
+
+
+def spd_move():
+    return apply_speed_profile()
+
+
 def grasp_gate_blocking():
     # ★9/10 밤: A타입에서 비차단으로 두고 6벽을 완주했다(안전망은 정렬 4mm·두 캠 1.5mm·막힘 감시).
     #   사용자 지시로 B타입도 같게 — 누를 버튼은 하강 하나.
@@ -382,11 +395,11 @@ def wait_user(what):
 def up_to_safe():
     cur = PC.st()["tcp"]
     if cur[2] < SAFE_Z - 1:
-        PC.speed(SPD_MOVE); move([cur[0], cur[1], SAFE_Z] + list(cur[3:]), tag="상승 SAFE")
+        PC.speed(spd_move()); move([cur[0], cur[1], SAFE_Z] + list(cur[3:]), tag="상승 SAFE")
 
 
 def goto_obs():
-    up_to_safe(); PC.speed(SPD_MOVE); move(OBS, tag="관측자세"); PC.speed(1)
+    up_to_safe(); PC.speed(spd_move()); move(OBS, tag="관측자세"); PC.speed(1)
 
 
 # ------------------------------------------------------------------ 씨앗(첫 기동 시 1회): 랙 자세·매핑·벽별 파지 z 는 로봇 자세 수준의 사실이라 가져온다
@@ -592,7 +605,7 @@ def stage_rack(color, teach_rack=False):
         raise Gate(f"{color} 랙 기준 없음")
     Jinv = np.array(jload(F["rack_map"])["Jinv_mm_per_px"], float)
     rp = jload(F["rack_pose"])["tcp"]
-    up_to_safe(); PC.speed(SPD_MOVE)
+    up_to_safe(); PC.speed(spd_move())
     move([rp[0], rp[1], SAFE_Z, 180.0, 0.0, 180.0], tag="랙 위 SAFE")
     # ★9/7 사고: 벽을 문 채 사이클을 시작하면 여기서 그리퍼를 열어 벽을 떨어뜨린다 → 열기 직전에 확인.
     #   ★20:1x: 이 검사를 사이클 맨 앞에서 하면 로봇이 베이스 위에 서 있을 때 기둥 빨간 점(785,522)을
@@ -662,7 +675,7 @@ def stage_rack(color, teach_rack=False):
         if nrm < 3.0:
             break                                                 # 이미 중앙인데도 안 맞음 → 아래서 게이트
         log(f"  랙 {color} 점 {n}개 중심 px ({c[0]:.0f},{c[1]:.0f}) — 끝점 잘림 의심(길이 {e['len_px'] if e else 0:.0f}px vs {L0:.0f}) → 카메라 ({d[0]:+.1f},{d[1]:+.1f})mm 이동 재관측 [{rnd+1}/3]")
-        PC.speed(SPD_MOVE); move([cur[0] + float(d[0]), cur[1] + float(d[1]), rp[2]] + list(rp[3:]), tag="랙 재관측 XY"); time.sleep(0.5)
+        PC.speed(spd_move()); move([cur[0] + float(d[0]), cur[1] + float(d[1]), rp[2]] + list(rp[3:]), tag="랙 재관측 XY"); time.sleep(0.5)
     if not e:
         raise Gate("랙에서 벽 양끝을 못 잡음 — 벽이 뒤집혔거나 점 가림. 랙에 다시 놓기")
     if abs(e["len_px"] - L0) > RACK_LEN_TOL * L0:
@@ -693,7 +706,7 @@ def stage_rack(color, teach_rack=False):
     _gm = {"mid_dot": "가운데 점", "ends_mid": "끝점 중점(가운데 점 미검출)"}.get(e.get("grip_mode", "ends_mid"), "?")
     log(f"  랙: 파지기준={_gm} ({e['mid'][0]:.0f},{e['mid'][1]:.0f}) 점 {e.get('n_dots','?')}개 길이 {e['len_px']:.0f}px 각 {e['ang']:+.2f}°(Δ{dang:+.2f}) → 파지 XY ({gx:.2f},{gy:.2f}) 보정 along {off['along']:+.2f} across {off['across']:+.2f}")
     zp = rr["z_pick"]
-    PC.speed(SPD_MOVE); move([gx, gy, rp[2]] + rot, tag="파지 XY 위")
+    PC.speed(spd_move()); move([gx, gy, rp[2]] + rot, tag="파지 XY 위")
     PC.speed(SPD_DESC); move([gx, gy, zp + 40] + rot, tag="픽 −40")
     PC.speed(SPD_SEAT); move([gx, gy, zp] + rot, tol=0.8, tag="픽 자세")
     if teach_rack:
@@ -769,7 +782,7 @@ def grasp_check(color, rack_dang, g_close, gr):
 def stage_carry_hover(color, T):
     set_stage("2' CARRY", color=color)
     rot = [180.0, 0.0, T["rz"]]
-    up_to_safe(); PC.speed(SPD_MOVE)
+    up_to_safe(); PC.speed(spd_move())
     move([T["x"], T["y"], SAFE_Z] + rot, tag="목표 위 SAFE(rz 정렬)")
     log(f"  (참고) 운반 후 그리퍼 {PC.grip_read()}")
     PC.speed(SPD_DESC); move([T["x"], T["y"], HOVER_Z] + rot, tag="호버 z478")
@@ -1003,7 +1016,7 @@ def release_and_rise(color, rr):
     cur = PC.st()["tcp"]
     PC.speed(SPD_SEAT); move([cur[0], cur[1], cur[2] + 30] + list(cur[3:]), tag="수직 +30")
     PC.speed(SPD_DESC); move([cur[0], cur[1], HOVER_Z] + list(cur[3:]), tag="호버 z478")
-    PC.speed(SPD_MOVE); move([cur[0], cur[1], SAFE_Z] + list(cur[3:]), tag="SAFE"); PC.speed(1)
+    PC.speed(spd_move()); move([cur[0], cur[1], SAFE_Z] + list(cur[3:]), tag="SAFE"); PC.speed(1)
     side_seat_after(color)
 
 
@@ -1029,6 +1042,7 @@ def stage_descend(color):
     if DESCEND_STOP_Z is not None and DESCEND_STOP_Z > z_tgt:
         log(f"  ⚠ 하강 정지 높이 z{DESCEND_STOP_Z:.0f} 적용 — 안착 z{z_tgt:.0f} 까지 내려가지 않는다(사용자 확인용)")
         z_tgt = DESCEND_STOP_Z
+    apply_speed_profile()                     # ★9/11 집 타입별 저속/채널 속도
     if color in JAM_FREE:
         # ★9/8 사용자 확인 "안 닿는 거 내가 확인했고 그냥 내리면 돼" — 내벽만. 외벽 4색은 종전 감시 그대로.
         log(f"  ⚠ [{color}] 막힘 감시 없이 수직 하강(사용자가 비접촉 확인) — 외벽 경로와 분리")
@@ -1085,6 +1099,7 @@ def stage_descend_reteach(color):
         log(f"  이미 안착 높이 z{cur[2]:.1f}(사용자 조그) → 하강 생략, 안착 판정부터")
     else:
         set_stage("3 DESCEND", color=color)
+        apply_speed_profile()
         PC.descend_monitored(color, cur[0], cur[1], [180.0, 0.0, cur[5]], T["z_seat"], rr.get("grip_close", 13))
     set_stage("3 SEAT CHECK", color=color)
     seat = seat_check(color)
@@ -1130,6 +1145,7 @@ def stage_descend_reteach(color):
     at = PC.st()["tcp"]
     log(f"  재하강 전 정렬 완료 TCP ({at[0]:.2f},{at[1]:.2f}) rz{at[5]:+.2f}")
     set_stage("3' RE-DESCEND", color=color)
+    apply_speed_profile()
     PC.descend_monitored(color, at[0], at[1], [180.0, 0.0, at[5]], T["z_seat"], rr.get("grip_close", 13))
     seat2 = seat_check(color); log(f"  재안착 판정: {seat2}")
     release_and_rise(color, rr)
