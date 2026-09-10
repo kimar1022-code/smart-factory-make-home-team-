@@ -440,7 +440,11 @@ def pick_hover_expo(color, ref):
         wa = int(max([q[2] for q in meas["wall"]], default=0)) if meas else 0
         print(f"  호버 노출 {e}: 벽 점 {nw}(면적 {wa}) 매칭 특징 {nm}")
         key = (nm, nw, wa)          # 매칭 수 → 벽 점 수 → 벽 점 면적(경계 노출 회피)
-        if nw >= 1 and nm >= 2 and (best is None or key > best[0]):
+        # ★9/10: 요구를 2 로 못박아 둬서 **기둥 1개짜리 지정 기준에서는 사다리가 절대 성공하지 못했다**
+        #   (오늘 밤 노랑이 어두워져 검출 0 이 됐는데 사다리를 다 돌고도 포기한 원인).
+        #   기준이 요구하는 개수를 그대로 쓴다 — 완화가 아니라 기준에 맞추는 것.
+        need = max(1, len(ref["pillars"]))
+        if nw >= 1 and nm >= need and (best is None or key > best[0]):
             best = (key, e)
     if best is None:
         return None
