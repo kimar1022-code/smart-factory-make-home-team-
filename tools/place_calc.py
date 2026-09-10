@@ -879,6 +879,11 @@ JAM_FINE_TAIL_MM = 15.0 # 안착 z 로부터 이 높이 아래는 다시 JAM_STE
 INNER_WALLS_DESC = {"red_in", "blue_in", "yellow_in"}
 INNER_FINE_TAIL_MM = 10.0   # 안착 z + 이 높이부터 3mm·저속 (안착 340 → 350 부터)
 INNER_SPD_CHANNEL = 15      # 그 위 구간 속도(%)
+# ★9/11 사용자 지시(A타입부터): 진입부·안착부 저속 1%→2%, 외벽 채널 10%→15%.
+#   하강 82초 중 1% 걸음 14개가 63초였다(카메라 확인은 걸음당 0.15초뿐). 값은 house_cycle 이 집 타입별로 세팅한다.
+#   B타입은 9/1 동결값(1 / 10) 유지.
+SPD_SLOW = 1               # 진입부·안착부(3mm 걸음) 속도(%)
+SPD_CHANNEL_OUTER = 10     # 외벽 채널(10mm 걸음) 속도(%)
 
 
 def descend_monitored(color, x, y, rot, zs, g_close):
@@ -953,17 +958,17 @@ def descend_monitored(color, x, y, rot, zs, g_close):
     # ★9/9 사용자 제안: 채널 안 자유 구간(10mm 스텝)만 속도를 올린다. 진입부(처음 JAM_FINE_HEAD)와
     #   안착부(마지막 JAM_FINE_TAIL_MM)는 1% 그대로 — 9/5 기둥 파손도, 오늘 막힘 4건도 전부 진입부(z+73~76)였다.
     #   판정은 정지 상태에서 재므로 속도와 무관하고, 바뀌는 것은 접촉 순간의 관성뿐이다.
-    SPD_CHANNEL = INNER_SPD_CHANNEL if _inner else 10
+    SPD_CHANNEL = INNER_SPD_CHANNEL if _inner else SPD_CHANNEL_OUTER
     n_step = 0
     z = max(zs, z0 - _step_mm(z0, n_step))
-    speed(1)
-    _spd_now = 1
+    speed(SPD_SLOW)
+    _spd_now = SPD_SLOW
     try:
         while True:
-            _want = 1 if _step_mm(z, n_step) == JAM_STEP else SPD_CHANNEL
+            _want = SPD_SLOW if _step_mm(z, n_step) == JAM_STEP else SPD_CHANNEL
             if _want != _spd_now:
                 speed(_want); _spd_now = _want
-                print(f"    (하강 속도 {_want}% — {'채널 안 자유 구간' if _want > 1 else '진입부/안착부'})")
+                print(f"    (하강 속도 {_want}% — {'채널 안 자유 구간' if _want != SPD_SLOW else '진입부/안착부'})")
             move([x, y, z] + rot, tol=0.8, timeout=25, tag=f"z+{z - zs:.0f}")
             g = grip_read()
             cur = held_wall_dots_jam(color)
@@ -1050,7 +1055,7 @@ def descend_plain(color, x, y, rot, zs, g_close):
         return JAM_STEP_FAST
 
     z = max(zs, z0 - _step_mm(z0, n_step))
-    speed(1)
+    speed(SPD_SLOW)                 # ★9/11: 집 타입별 저속(A 2% / B 1%)
     try:
         while True:
             move([x, y, z] + rot, tol=0.8, timeout=25, tag=f"z+{z - zs:.0f}")
