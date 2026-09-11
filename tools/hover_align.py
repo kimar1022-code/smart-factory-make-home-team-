@@ -576,13 +576,23 @@ def delta(ref, meas, z_tcp, rz_tcp, src="wrist", tcp_now=None):
               f"[{src}] 기둥 예상 이동 ({sx:+.0f},{sy:+.0f})px 만큼 옮겨서 찾는다)", flush=True)
     s_, d_, lab = match_feats(ref_p, meas["pillars"],
                               SINGLE_SEARCH_PX if single else DET[src]["search"])
-    if (sx or sy) and not s_:
-        # 예측 자리에 없으면 '베이스가 움직여 로봇이 따라간 경우'(기둥은 기준 픽셀 그대로) — 이동 없이 한 번 더
-        s_, d_, lab = match_feats(ref["pillars"], meas["pillars"],
-                                  SINGLE_SEARCH_PX if single else DET[src]["search"])
-        if s_:
-            print(f"  ([{src}] 예측 자리엔 없고 기준 픽셀 자리에서 찾음 — 베이스 이동을 로봇이 따라간 경우)", flush=True)
-            sx = sy = 0.0
+    if not s_:
+        # 두 가설: ① 베이스가 움직여 로봇이 따라감 → 기둥은 '계산 목표' 기준 예측 자리(EXPECT_TCP, 첫 회엔 기준 픽셀 그대로)
+        #          ② 베이스 측정이 틀림 → 기둥은 '기준 자리' 기준 예측 자리(9/11 오전 B 파랑: 6mm 어긋나 30px 밀려 보임)
+        #   ①에서 못 찾으면 ②를 뒤진다. 반경은 그대로(15px) — 넓히는 게 아니라 '있을 법한 두 자리'를 본다.
+        global EXPECT_TCP
+        _keep = EXPECT_TCP
+        try:
+            EXPECT_TCP = None
+            sx2, sy2 = _pred_shift_px(ref, z_tcp, rz_tcp, src, tcp_now) if tcp_now else (0.0, 0.0)
+        finally:
+            EXPECT_TCP = _keep
+        if (abs(sx2 - sx) > 2 or abs(sy2 - sy) > 2):
+            ref_p2 = [(c, x + sx2, y + sy2, a) for c, x, y, a in ref["pillars"]]
+            s_, d_, lab = match_feats(ref_p2, meas["pillars"], SINGLE_SEARCH_PX if single else DET[src]["search"])
+            if s_:
+                print(f"  ([{src}] 가설① 자리엔 없고 가설②(기준 자리 대비 {sx2:+.0f},{sy2:+.0f}px)에서 찾음 — 베이스 측정 오차 의심)", flush=True)
+                sx, sy = sx2, sy2
     if sx or sy:
         s_ = [(x - sx, y - sy) for x, y in s_]      # ★sim 은 반드시 '원래 기준 픽셀 → 지금' 이어야 한다
     if single and s_:
