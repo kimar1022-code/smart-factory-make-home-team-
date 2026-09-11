@@ -159,6 +159,12 @@ _RUN_ORDER_A = ("blue", "yellow", "red", "red_s", "blue_in", "yellow_in")
 _RUN_ORDER_B = ("blue", "yellow", "red", "red_s", "red_in")
 def run_order():
     return _RUN_ORDER_B if house_type() == "b" else _RUN_ORDER_A
+# ★9/11 사용자 지시: 외벽 사이클 / 내벽 사이클 분리 — 외벽 4색은 A·B 공통, 내벽만 집 타입별.
+OUTER_ORDER = ("blue", "yellow", "red", "red_s")
+def outer_order():
+    return OUTER_ORDER
+def inner_order():
+    return tuple(c for c in run_order() if c in INNER_WALLS)
 RUN4_ORDER = _RUN_ORDER_A   # 하위호환(직접 참조하는 옛 코드용) — 실제 사용은 run_order()
 # 13:53 실기 2회: 손목캠↔새카메라 불일치 2.1mm 반복. 사용자 육안 자리와 비교하면 새카메라가 두 번 다 가까웠음(rz 특히).
 #   손목캠은 든 벽 윗점이 프레임 가장자리(x≈1025)라 원근·죠 안 기울기에 민감 → 파랑은 새카메라 단독 정렬(손목캠은 참고 출력).
@@ -1586,6 +1592,8 @@ def handle_cmd(q):
         r4 = S.get("run4"); in_run4_wait = bool(r4 and r4.get("active") and S.get("stage") == "WAIT DESCEND" and S.get("wait"))
     if op == "descend" and in_run4_wait:                             # ④run4 는 워커가 점유 중 → 하강 버튼 = 계속
         RESUME.set(); return {"ok": True, "note": "run4: 하강 진행"}
+    if op in ("run_outer", "run_inner"):                            # ★9/11 외벽/내벽 사이클 = run4 의 순서만 다름
+        q = dict(q); q["order"] = [",".join(outer_order() if op == "run_outer" else inner_order())]; op = "run4"
     if op in ("start", "descend", "goto_obs", "slot2", "probe", "run4", "slot_both", "resume_held", "descend_reteach", "align_here", "to_target", "lift"):
         if S["busy"]:
             return {"ok": False, "err": "실행 중 — 먼저 중단"}
@@ -1670,7 +1678,9 @@ pre{background:#000;padding:8px;height:340px;overflow:auto;font-size:24px;line-h
  <button class="run" onclick="cmd('resume_held')">▶ 든 채로 3단계부터(운반→z440 정렬→하강 대기)</button>
  <button class="run" onclick="cmd('align_here')">▶ 여기서 정렬만 다시(z440, 든 채)</button>
  <button class="teach" onclick="cmd('to_target')">◎ 계산 목표로 복귀(기준 재촬영용)</button>
- <button class="big run" onclick="if(confirm('4벽 연속 blue→yellow→red→red_s? 벽마다 빈손 베이스 재측정, 하강은 매번 [⬇ 하강] 버튼'))cmd('run4')">▶ 4벽 연속(run4)</button>
+ <button class="big run" onclick="if(confirm('외벽 사이클 blue→yellow→red→red_s (A·B 공통)? 벽마다 빈손 베이스 재측정, 하강은 매번 [⬇ 하강] 버튼'))cmd('run_outer')">▶ 외벽 사이클(4색)</button>
+ <button class="big run" onclick="if(confirm('내벽 사이클 (A: blue_in→yellow_in / B: red_in)? 외벽 4색이 다 꽂힌 뒤에만'))cmd('run_inner')">▶ 내벽 사이클</button>
+ <button class="run" onclick="if(confirm('전체 사이클 외벽4→내벽 (지금 집 타입 순서)?'))cmd('run4')">▶ 전체(외벽+내벽)</button>
  <button class="big run" onclick="if(confirm('출하 리프트? 집에 포크 손잡이 끼워져 있고 출하지(-700,-100) 비었나. 로봇은 빈손·z440 이상'))cmd('lift')">🏠 리프트(출하)</button>
  <button class="big down" id=desc onclick="if(confirm('수직 하강? x·y·yaw 확인했나'))cmd('descend')">⬇ 하강(3)</button>
  <button class="down" onclick="if(confirm('하강 → 안착 성공 시 든 채로 z440 올려 기준 재촬영 → 재하강·놓기?'))cmd('descend_reteach')">⬇ 하강+성공 시 z440 기준 재촬영</button>
