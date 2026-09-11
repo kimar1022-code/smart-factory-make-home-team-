@@ -38,8 +38,9 @@ if ! pgrep -f "ref_view.p[y]" >/dev/null 2>&1; then
 fi
 # ★9/11 글로벌캠: 비전 PC(192.168.20.30)가 HMV1/UDP 21031 로 쏘는 셀 탑뷰 → :8779 MJPEG 중계(콘솔 '글로벌캠' 패널)
 if ! pgrep -f "global_udp_ca[m].py" >/dev/null 2>&1; then
-  nohup python3 "$HOME/bf2_console/global_udp_cam.py" > "$HOME/bf2_console/logs/global_udp_cam.log" 2>&1 &
-  echo "  ★9/11 글로벌캠 UDP 중계 기동(:8779, /stream /snap /health)"
+  # 9/11 오후 사용자가 글로벌캠(C270)을 로봇 PC USB 에 직결 → 기본은 USB(v4l2). 비전 PC UDP 로 돌리려면 GCAM_SOURCE=udp
+  GCAM_SOURCE="${GCAM_SOURCE:-v4l2}" GCAM_DEV="${GCAM_DEV:-/dev/video8}" nohup python3 "$HOME/bf2_console/global_udp_cam.py" > "$HOME/bf2_console/logs/global_udp_cam.log" 2>&1 &
+  echo "  ★9/11 글로벌캠 기동(:8779, 소스 ${GCAM_SOURCE:-v4l2}, /stream /snap /health)"
 fi
 if ! pgrep -f "house_cycle.p[y]" >/dev/null 2>&1; then
   nohup python3 "$HOME/bf2_console/tools/house_cycle.py" > "$HOME/bf2_console/logs/house_cycle.log" 2>&1 &

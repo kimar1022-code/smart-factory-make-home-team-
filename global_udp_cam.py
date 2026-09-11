@@ -24,6 +24,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import cv2
 import numpy as np
 
+SOURCE = os.environ.get("GCAM_SOURCE", "udp")          # "udp" = 비전 PC HMV1 수신 / "v4l2" = 로봇 PC 에 USB 직결(9/11 사용자 "내쪽에서 띄워줘")
+V4L2_DEV = os.environ.get("GCAM_DEV", "/dev/video8")   # C270 HD WEBCAM (1280x960 MJPG 10fps)
+V4L2_RES = os.environ.get("GCAM_RES", "1280x960")
+V4L2_FPS = int(os.environ.get("GCAM_FPS", "10"))
 UDP_PORT = int(os.environ.get("GCAM_UDP_PORT", "21031"))
 HTTP_PORT = int(os.environ.get("GCAM_HTTP_PORT", "8779"))
 STREAM_ID = 3
@@ -78,6 +82,39 @@ def rx_loop():
             stats["fps"] = round(fps_n / (now - fps_t), 1); fps_t, fps_n = now, 0
 
 
+def v4l2_loop():
+    """USB 직결 소스: 카메라 MJPG 프레임을 JPEG 로 다시 싸서 latest 에 넣는다(UDP 경로와 같은 출력)."""
+    w, h = (int(v) for v in V4L2_RES.lower().split("x"))
+    fid = 0; fps_t, fps_n = time.time(), 0
+    while True:
+        cap = cv2.VideoCapture(V4L2_DEV, cv2.CAP_V4L2)
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, w); cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h); cap.set(cv2.CAP_PROP_FPS, V4L2_FPS)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        if not cap.isOpened():
+            stats["bad"] += 1; time.sleep(2.0); continue
+        stats["src"] = V4L2_DEV
+        while True:
+            ok, img = cap.read()
+            if not ok or img is None:
+                stats["dropped"] += 1
+                if stats["dropped"] % 30 == 0:
+                    break                      # 연속 실패 → 재오픈(케이블 재삽입 대비)
+                time.sleep(0.05); continue
+            ok2, out = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            if not ok2:
+                stats["bad"] += 1; continue
+            fid += 1
+            with new_frame:
+                latest.update(jpg=out.tobytes(), fid=fid, ts=int(time.time() * 1000), t=time.time())
+                new_frame.notify_all()
+            stats["complete"] += 1; stats["packets"] += 1; fps_n += 1
+            now = time.time()
+            if now - fps_t >= 2.0:
+                stats["fps"] = round(fps_n / (now - fps_t), 1); fps_t, fps_n = now, 0
+        cap.release(); time.sleep(1.0)
+
+
 def encode_scaled(jpg, w):
     """콘솔용 축소본(무선 부하 — 원본은 프레임당 ~180KB). w 가 없거나 원본 이상이면 그대로."""
     if not w:
@@ -124,7 +161,7 @@ class H(BaseHTTPRequestHandler):
         if path == "/health":
             with lock:
                 age = None if latest["t"] == 0 else round(time.time() - latest["t"], 2)
-                body = json.dumps(dict(ok=latest["jpg"] is not None and age is not None and age < 3, boot=BOOT, fid=latest["fid"],
+                body = json.dumps(dict(ok=latest["jpg"] is not None and age is not None and age < 3, boot=BOOT, fid=latest["fid"], source=SOURCE,
                                        age=age, **stats)).encode()
             return self._send(200, body, "application/json")
         if path == "/":
@@ -159,6 +196,10 @@ class H(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    threading.Thread(target=rx_loop, daemon=True).start()
-    print(f"global_udp_cam: UDP :{UDP_PORT} (HMV1 stream {STREAM_ID}) → http://0.0.0.0:{HTTP_PORT}/  /stream /stream?w=640 /snap /health", flush=True)
+    if SOURCE == "v4l2":
+        threading.Thread(target=v4l2_loop, daemon=True).start()
+        print(f"global_udp_cam: USB {V4L2_DEV} {V4L2_RES}@{V4L2_FPS} → http://0.0.0.0:{HTTP_PORT}/  /stream /stream?w=640 /snap /health", flush=True)
+    else:
+        threading.Thread(target=rx_loop, daemon=True).start()
+        print(f"global_udp_cam: UDP :{UDP_PORT} (HMV1 stream {STREAM_ID}) → http://0.0.0.0:{HTTP_PORT}/  /stream /stream?w=640 /snap /health", flush=True)
     ThreadingHTTPServer(("0.0.0.0", HTTP_PORT), H).serve_forever()
