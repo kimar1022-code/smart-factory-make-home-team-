@@ -608,6 +608,13 @@ def measure_base(holding=False):
         speed(1)
     Jinv, mp = STG.load_map()
     px4, dxy = find_base_4pts(holding)
+    try:                                                     # ★9/12 베이스 단계 기준점(손목캠): 밑판 기둥 4점
+        if _RO is not None and px4:
+            _RO.publish_pts("base", "wrist", "1 BASE",
+                            now=[[f"P{i+1} {p[3] if len(p)>3 else ''}", (p[3] if len(p)>3 else "green"), p[0], p[1]] for i, p in enumerate(px4)],
+                            note=f"base pillars {len(px4)}/4")
+    except Exception:
+        pass
     a = json.load(open(STG.ANCH))
     pose, rms, _ = STG.base_pose_robot(px4, Jinv, tuple(a["C"]), tuple(a["p0"]))
     if abs(dxy[0]) + abs(dxy[1]) > 0.01:

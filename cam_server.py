@@ -176,6 +176,12 @@ def detect_dots(img):
 # ─────────────────────────────────────────────────────────────────────
 W, HGT = 1280, 720
 SRC = {"name": "rs", "last_ts": 0.0, "frames": 0}   # /health 용
+try:                                                     # ★9/12 기준점 오버레이(표시 전용)
+    import sys as _sys, os as _os; _sys.path.insert(0, _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "tools"))
+    import refpts_overlay as _RO
+except Exception:
+    _RO = None
+_RO_SRC = {"rs": "wrist", "v4l2": "newcam"}
 
 
 def _fit(img):
@@ -835,6 +841,7 @@ def cam_loop(src):
                                   for k, (x, y), a in dots]                # /dots?raw=1 로 확인용
             if STAB_ON:
                 dots = tracker.update(dots)
+        _ro = bool(_RO is not None and SRC["name"] in _RO_SRC)   # ★9/12 항상 기준점만
         fk = focus["kinds"]
         if fk and do_det:
             dots = [d for d in dots if d[0] in fk]
@@ -849,7 +856,7 @@ def cam_loop(src):
             cv2.circle(img, tuple(map(int, sxy)), SEED_R, (255, 0, 255), 1)
             cv2.drawMarker(img, tuple(map(int, sxy)), (255, 0, 255),
                            cv2.MARKER_TILTED_CROSS, 24, 2)
-        for kind, (dxf, dyf), area in dots:
+        for kind, (dxf, dyf), area in ([] if _ro else dots):
             dx, dy = int(round(dxf)), int(round(dyf))
             color = {"white": (255, 255, 255), "blue": (255, 128, 0),
                      "red": (0, 0, 255), "yellow": (0, 200, 255),
@@ -866,8 +873,12 @@ def cam_loop(src):
         if fk:
             cv2.putText(img, "FOCUS " + "+".join(sorted(fk)), (1000, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 255), 2)
-        cv2.putText(img, info, (12, 705), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
-                    (0, 255, 255), 2)
+        if not _ro:
+            cv2.putText(img, info, (12, 705), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
+                        (0, 255, 255), 2)
+        if _RO is not None and SRC["name"] in _RO_SRC:
+            try: _RO.draw(img, _RO_SRC[SRC["name"]])         # 기준점/매칭점(기준점만 모드가 아니어도 위에 겹침)
+            except Exception: pass
         ok, jpg = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 80])
         if ok:
             with lock:

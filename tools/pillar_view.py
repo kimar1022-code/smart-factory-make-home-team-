@@ -22,6 +22,10 @@ import cv2, numpy as np
 sys.path.insert(0, "/home/ar/bf2_console/tools")
 import pillar_dots as PD
 import color_lock as CL
+try:
+    import refpts_overlay as RO     # ★9/12
+except Exception:
+    RO = None
 
 CAM = "http://127.0.0.1:8766"
 PORT = 8773
@@ -72,6 +76,12 @@ def worker():
             if img is None:
                 time.sleep(0.15); continue
             out = img.copy()
+            if RO is not None:                              # ★9/12 항상 그 단계의 기준점만
+                try: RO.draw(out, "wrist")
+                except Exception: pass
+                ok, jpg = cv2.imencode(".jpg", out, [cv2.IMWRITE_JPEG_QUALITY, 82])
+                if ok: state.update(jpg=jpg.tobytes(), t=time.time())
+                time.sleep(0.12); continue
 
             if rect is not None:
                 cv2.polylines(out, [np.array(rect, np.int32)], True, (90, 90, 90), 1)
@@ -119,6 +129,9 @@ def worker():
             cv2.putText(out, bar, (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.62,
                         (0, 255, 120) if n == 4 else (0, 165, 255), 2)
 
+            if RO is not None:
+                try: RO.draw(out, "wrist")                 # 일반 모드에서도 기준점은 위에 겹쳐 그린다
+                except Exception: pass
             ok, jpg = cv2.imencode(".jpg", out, [cv2.IMWRITE_JPEG_QUALITY, 82])
             if ok:
                 state.update(jpg=jpg.tobytes(), found=n, margin=round(worst, 3),
