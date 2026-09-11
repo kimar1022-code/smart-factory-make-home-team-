@@ -457,6 +457,36 @@ def pick_hover_expo(color, ref):
     set_expo(best[1]); print(f"  → 호버 노출 {best[1]} 채택(매칭 {best[0][0]})"); return best[1]
 
 
+def pick_expo_by_area(color, ref, src="wrist"):
+    """★9/11 17:00 B 파랑: 지정 기둥이 예측 자리에서 잡히는데 면적 53%(392/694) — 방이 어젯밤보다 밝아 기준 노출 333 에선
+    노란 점이 날아간다(실측 250 에서 86%). 사용자 지시 "못 잡으면 카메라를 조정해 특정지어 잡아라":
+    사다리를 돌며 **지정 기둥 면적이 기준에 가장 가까운** 노출을 고른다(벽 점 ≥1 이어야 채택). 게이트는 그대로."""
+    rp = ref["pillars"][0] if ref.get("pillars") else None
+    if rp is None:
+        return None
+    best = None
+    ladder = ([float(ref["expo"])] if ref.get("expo") else []) + [e for e in HOVER_EXPO_LADDER]
+    for e in ladder:
+        set_expo(e); time.sleep(EXPO_SETTLE_S)
+        meas, why = measure(grab(src), color, ref, None, src)
+        if not meas or not meas["wall"]:
+            print(f"  면적 노출 {e:.0f}: 벽 점 없음", flush=True); continue
+        s_, d_, _ = match_feats(ref["pillars"], meas["pillars"], DET[src]["search"])
+        if not s_:
+            print(f"  면적 노출 {e:.0f}: 기둥 매칭 없음", flush=True); continue
+        got = min(meas["pillars"], key=lambda q: math.hypot(q[1] - d_[0][0], q[2] - d_[0][1]))
+        ratio = got[3] / rp[3] if rp[3] else 1.0
+        print(f"  면적 노출 {e:.0f}: 기둥 면적 {int(got[3])}/{int(rp[3])} ({ratio:.0%})", flush=True)
+        key = abs(math.log(max(ratio, 1e-3)))
+        if best is None or key < best[0]:
+            best = (key, e, ratio)
+    if best is None:
+        return None
+    set_expo(best[1]); time.sleep(EXPO_SETTLE_S)
+    print(f"  → 면적 기준 노출 {best[1]:.0f} 채택 ({best[2]:.0%})", flush=True)
+    return best[1]
+
+
 # ------------------------------------------------------------------ 기하
 def _rot(th):
     c, s = math.cos(math.radians(th)), math.sin(math.radians(th))
@@ -922,6 +952,14 @@ def check(color, srcs=None, roles=None):
             if _b is None: continue
             return None, per, _b[1]
         D, why = delta(ref, meas, z, rz, src, tcp_now=t)
+        if D is None and src == "wrist" and "면적" in (why or "") and not getattr(check, "area_expo_done", False):
+            check.area_expo_done = True
+            print(f"  ⚠ [{src}] {why} → 노출을 조정해 같은 점을 기준 면적으로 다시 잡는다", flush=True)
+            if pick_expo_by_area(color, ref, src) is not None:
+                check.expo_done = True          # 고른 노출을 정렬 끝까지 유지(안 그러면 다음 반복에서 기준 노출로 되돌아가 또 실패)
+                meas, why2 = measure_multi(color, ref, None, src)
+                if meas:
+                    D, why = delta(ref, meas, z, rz, src, tcp_now=t)
         if D is None:
             _b = _bail(why)
             if _b is None: continue
@@ -987,6 +1025,7 @@ def align(color, dry=False, tol_mm=TOL_MM, tol_deg=TOL_DEG, srcs=None, roles=Non
     """보정 루프. 수렴 True / dry False / 실패 예외(호출자가 정지·보고). srcs 로 카메라 지정, roles 로 역할(xy/rz/both/measure)."""
     prev = None
     check.expo_done = False
+    check.area_expo_done = False
     rz_fixed = False
     for it in range(MAX_ITER):
         C, per, why = check(color, srcs, roles)
