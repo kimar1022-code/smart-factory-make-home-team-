@@ -1284,6 +1284,8 @@ function camPanel(id,btnId,label,streamUrl,def){
    if(j.age!=null&&j.age>5)nc.connect()}catch(e){if(++nFail===3){nc.connect()}}},3000);
  /* 9/11 글로벌캠 — 비전 PC 가 HMV1/UDP 로 쏘는 셀 탑뷰를 global_udp_cam.py(:8779)가 MJPEG 로 중계. 콘솔은 640 축소본(무선 부하) */
  const GCAM=`http://${H}:8779`;
+ /* 8/26 RTSP 글로벌캠 패널이 같은 id 로 '닫힘' 상태를 남겨 새 패널이 숨겨졌다(9/11 실측) — 최초 1회만 초기화 */
+ try{if(!localStorage.getItem('gcam.v2')){localStorage.removeItem('campanel.gcamwrap');localStorage.setItem('gcam.v2','1')}}catch(e){}
  const gc=camPanel('gcamwrap','tg-gcam','글로벌캠',GCAM+'/stream?w=640',{x:Math.max(0,R.width-430),y:10,w:420,on:true});
  let gBoot=null,gFail=0;
  setInterval(async()=>{if(!gc.st.on)return;try{const j=await(await fetch(GCAM+'/health',{cache:'no-store'})).json();gFail=0;
