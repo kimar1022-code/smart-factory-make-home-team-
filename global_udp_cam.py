@@ -28,6 +28,29 @@ SOURCE = os.environ.get("GCAM_SOURCE", "udp")          # "udp" = 비전 PC HMV1 
 V4L2_DEV = os.environ.get("GCAM_DEV", "/dev/video8")   # C270 HD WEBCAM (1280x960 MJPG 10fps)
 V4L2_RES = os.environ.get("GCAM_RES", "1280x960")
 V4L2_FPS = int(os.environ.get("GCAM_FPS", "10"))
+CROP_F = os.environ.get("GCAM_CROP_FILE", "/home/ar/bf2_console/state/gcam_crop.json")
+# ★9/11 사용자 지정 화각: 왼쪽 바닥 여백을 걷어내고 조립대~FR5 가 꽉 차게(원본 1280x960 안에서 잘라낸다).
+CROP_DEFAULT = {"x": 210, "y": 0, "w": 1045, "h": 950}
+
+
+def load_crop():
+    try:
+        with open(CROP_F, encoding="utf-8") as f:
+            d = json.load(f)
+        return None if not d else {k: int(d[k]) for k in ("x", "y", "w", "h")}
+    except FileNotFoundError:
+        return dict(CROP_DEFAULT)
+    except Exception:
+        return dict(CROP_DEFAULT)
+
+
+def save_crop(c):
+    os.makedirs(os.path.dirname(CROP_F), exist_ok=True)
+    with open(CROP_F, "w", encoding="utf-8") as f:
+        json.dump(c or {}, f, ensure_ascii=False)
+
+
+CROP = {"v": None}          # 기동 시 load_crop() 으로 채운다
 UDP_PORT = int(os.environ.get("GCAM_UDP_PORT", "21031"))
 HTTP_PORT = int(os.environ.get("GCAM_HTTP_PORT", "8779"))
 STREAM_ID = 3
@@ -115,15 +138,25 @@ def v4l2_loop():
         cap.release(); time.sleep(1.0)
 
 
-def encode_scaled(jpg, w):
-    """콘솔용 축소본(무선 부하 — 원본은 프레임당 ~180KB). w 가 없거나 원본 이상이면 그대로."""
-    if not w:
+def encode_scaled(jpg, w, crop=None):
+    """크롭(화각) → 폭 w 로 축소. 둘 다 없으면 원본 JPEG 를 그대로 돌려준다(재인코딩 안 함)."""
+    crop = CROP["v"] if crop is None else crop
+    if not w and not crop:
         return jpg
     img = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR)
-    if img is None or w >= img.shape[1]:
+    if img is None:
         return jpg
-    h = int(round(img.shape[0] * w / img.shape[1]))
-    ok, out = cv2.imencode(".jpg", cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA), [cv2.IMWRITE_JPEG_QUALITY, 80])
+    if crop:
+        H, W = img.shape[:2]
+        x = max(0, min(W - 1, crop["x"])); y = max(0, min(H - 1, crop["y"]))
+        cw = max(16, min(W - x, crop["w"])); ch = max(16, min(H - y, crop["h"]))
+        img = img[y:y + ch, x:x + cw]
+    if w and w < img.shape[1]:
+        h = int(round(img.shape[0] * w / img.shape[1]))
+        img = cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)
+    elif not crop:
+        return jpg
+    ok, out = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
     return out.tobytes() if ok else jpg
 
 
@@ -162,8 +195,20 @@ class H(BaseHTTPRequestHandler):
             with lock:
                 age = None if latest["t"] == 0 else round(time.time() - latest["t"], 2)
                 body = json.dumps(dict(ok=latest["jpg"] is not None and age is not None and age < 3, boot=BOOT, fid=latest["fid"], source=SOURCE,
-                                       age=age, **stats)).encode()
+                                       age=age, crop=CROP["v"], **stats)).encode()
             return self._send(200, body, "application/json")
+        if path == "/crop":
+            # /crop            → 현재 화각    /crop?reset=1 → 전체 화면
+            # /crop?x=&y=&w=&h= → 화각 지정(원본 1280x960 픽셀 기준, 파일에 저장돼 재기동에도 유지)
+            if qs.get("reset"):
+                CROP["v"] = None; save_crop(None)
+            elif all(k in qs for k in ("x", "y", "w", "h")):
+                try:
+                    c = {k: int(qs[k]) for k in ("x", "y", "w", "h")}
+                except ValueError:
+                    return self._send(400, b'{"err":"x,y,w,h must be int"}', "application/json")
+                CROP["v"] = c; save_crop(c)
+            return self._send(200, json.dumps({"crop": CROP["v"], "full": [1280, 960]}).encode(), "application/json")
         if path == "/":
             return self._send(200, PAGE.encode(), "text/html; charset=utf-8")
         w = int(qs.get("w", "0") or 0)
@@ -196,6 +241,7 @@ class H(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    CROP["v"] = load_crop()
     if SOURCE == "v4l2":
         threading.Thread(target=v4l2_loop, daemon=True).start()
         print(f"global_udp_cam: USB {V4L2_DEV} {V4L2_RES}@{V4L2_FPS} → http://0.0.0.0:{HTTP_PORT}/  /stream /stream?w=640 /snap /health", flush=True)
