@@ -536,6 +536,20 @@ def match_feats(ref_p, now_p, search=None):
     return src, dst, lab
 
 
+def plane_scale(ref):
+    """★9/11: 기준 특징이 놓인 평면의 자 보정 배율. 기둥 '윗면'에서 실측한 Jinv 를 그 평면에 맞게 늘린다.
+    내벽(blue_in·yellow_in)의 기준점은 밑판 '바닥' 이라 카메라에서 더 멀고, 같은 mm 이동에 픽셀이 덜 움직인다.
+    실측(9/11 z440, 빈손): 로봇 ±4mm 프로브 → 밑판 노란 점 14.5px/4mm = 3.66px/mm (0.2730 mm/px).
+      교차검증: 사용자가 밑판에 붙인 빨강·파랑 스티커(점 사이 30mm) = 112.0px → 0.2679 mm/px (1.9% 차).
+      그때 쓰던 자 0.1832 mm/px → **1.49배 작았다**(정렬이 필요량의 2/3만 움직여 수렴이 질질 끌림).
+    ref["plane_scale"] 에 저장한다(색·카메라별). 없으면 1.0 = 종전 그대로(외벽 8색·B red_in 영향 0)."""
+    try:
+        v = float(ref.get("plane_scale", 1.0))
+    except Exception:
+        return 1.0
+    return v if 0.2 <= v <= 5.0 else 1.0
+
+
 def jinv_for(src, z_tcp, rz_tcp):
     """카메라별 (Jinv[mm/px, 로봇 프레임], rot_sign). 손목캠: 높이·rz 환산. 고정캠(newcam/side): probe 파일 그대로."""
     if src == "wrist":
@@ -584,7 +598,7 @@ def _pred_shift_px(ref, z_tcp, rz_tcp, src, tcp_now):
     if float(np.hypot(*d_mm)) < 0.3:                       # 같은 자리 — 굳이 밀지 않는다
         return (0.0, 0.0)
     try:
-        J = np.linalg.inv(jinv_for(src, z_tcp, rz_tcp)[0])
+        J = np.linalg.inv(jinv_for(src, z_tcp, rz_tcp)[0] * plane_scale(ref))
     except Exception:
         return (0.0, 0.0)
     v = J @ d_mm
@@ -682,7 +696,7 @@ def delta(ref, meas, z_tcp, rz_tcp, src="wrist", tcp_now=None):
         # ★밑판 기준: 밑판 특징이 기준 자리에서 (tx,ty) 만큼 옮겨 보이면, 로봇이 밑판에 대해 그만큼 움직인 것이다.
         #   되돌리려면 반대로 간다 → dpx = (-tx, -ty). (9/10 실측 검증: 밑판 점 이동 = +J·Δ로봇)
         dpx = (-float(tx), -float(ty))
-        Jinv, rsign = jinv_for(src, z_tcp, rz_tcp)
+        Jinv, rsign = jinv_for(src, z_tcp, rz_tcp); Jinv = Jinv * plane_scale(ref)
         dmm = Jinv @ np.array(dpx)
         return {"src": src, "dpx": dpx, "dang_img": -th, "dmm": (float(dmm[0]), float(dmm[1])),
                 "drz": 0.0, "sim": {"s": s, "theta": th, "rms": rms},
@@ -723,7 +737,7 @@ def delta(ref, meas, z_tcp, rz_tcp, src="wrist", tcp_now=None):
         if dang > 90: dang -= 180
         if dang < -90: dang += 180
     dpx = (mid_now[0] - mid_exp[0], mid_now[1] - mid_exp[1])
-    Jinv, rsign = jinv_for(src, z_tcp, rz_tcp)
+    Jinv, rsign = jinv_for(src, z_tcp, rz_tcp); Jinv = Jinv * plane_scale(ref)
     dmm = Jinv @ np.array(dpx)
     if SRC[src]["moving"] == "wall":
         dmm = -dmm                     # 벽이 로봇과 함께 움직이는 카메라: Δ 를 없애려면 반대로
