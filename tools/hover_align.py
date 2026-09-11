@@ -70,6 +70,7 @@ SCALE_TOL, RMS_TOL_PX = 0.03, 6.0
 MAX_STEP_MM, MAX_STEP_DEG = 3.0, 0.5
 TOL_MM, TOL_DEG = 0.3, 0.15
 EXPECT_TCP = None   # ★9/11: 이번 사이클의 계산 목표 [x,y] — 예측 이동 매칭의 기준점(house_cycle 이 정렬 전에 세팅)
+SANE_MAX_MM = 25.0   # ★9/11: 한 번의 정렬 계산이 이 크기를 넘으면 오매칭으로 보고 거부(실기 53mm 명령 사고)
 COMBINE_TOL_MM, COMBINE_TOL_DEG = 1.5, 0.6
 FAR_STEP_MM = 4.0   # ★9/11: 두 캠이 같은 방향으로 이만큼 넘게 멀면 불일치 판정을 보류하고 다가간다
 MIN_EXEC_MM = 0.8                               # 로봇 최소 실행 이동량(실측). 이보다 작은 보정은 명령해도 왜곡돼 실행된다
@@ -726,6 +727,17 @@ def delta(ref, meas, z_tcp, rz_tcp, src="wrist", tcp_now=None):
             return None, f"[{src}] 든 벽 점 짝 거리 {far:.0f}px > {WALL_PAIR_MAX_PX} — 오매칭 의심(재파지/기준 재촬영)"
         print(f"  (든 벽 점 측정 {len(meas['wall'])}개 중 기준과 짝지은 {len(pick)}개 사용, 최대 짝 거리 {far:.0f}px)", flush=True)
         w_now = w_now[pick]
+    if one_dot and len(w_exp) >= 2 and len(w_now) >= 1:
+        # ★9/11 19:33 실기: 기준 2점인데 1점만 검출되자 **순서만 보고 기준 첫 점과 비교** → Δ(-195,+64)px
+        #   = 두 기준 점 간격(194px) 그대로. 자 1.49배가 곱해져 53mm 명령 → 12mm 끌려간 뒤 발산 감지로 정지.
+        #   1점만 보일 때는 '그 점이 어느 기준 점인지' 를 최근접으로 고르고, 그마저 멀면 거부한다.
+        j = int(np.argmin([float(np.hypot(w_now[0][0] - e[0], w_now[0][1] - e[1])) for e in w_exp]))
+        dd = float(np.hypot(w_now[0][0] - w_exp[j][0], w_now[0][1] - w_exp[j][1]))
+        if dd > WALL_PAIR_MAX_PX:
+            return None, (f"[{src}] 든 벽 점 {len(w_now)}/{len(w_exp)}개만 검출 — 가장 가까운 기준 점과도 {dd:.0f}px "
+                          f"> {WALL_PAIR_MAX_PX} — 벽이 프레임 밖으로 나갔거나 오매칭. 재파지 권함")
+        print(f"  (든 벽 점 1개만 검출 → 기준 {j+1}번 점과 짝지음, 거리 {dd:.0f}px)", flush=True)
+        w_exp = w_exp[j:j + 1]
     if one_dot:
         w_exp, w_now = w_exp[:1], w_now[:1]
         mid_exp, mid_now = tuple(w_exp[0]), tuple(w_now[0]); dang = -th
@@ -739,6 +751,9 @@ def delta(ref, meas, z_tcp, rz_tcp, src="wrist", tcp_now=None):
     dpx = (mid_now[0] - mid_exp[0], mid_now[1] - mid_exp[1])
     Jinv, rsign = jinv_for(src, z_tcp, rz_tcp); Jinv = Jinv * plane_scale(ref)
     dmm = Jinv @ np.array(dpx)
+    if float(np.hypot(*dmm)) > SANE_MAX_MM:      # ★9/11: 정상 사이클에서 나올 수 없는 크기 — 계산 결과를 믿지 말고 즉시 거부
+        return None, (f"[{src}] 정렬 계산 {float(np.hypot(*dmm)):.1f}mm (Δ{dpx[0]:+.0f},{dpx[1]:+.0f}px) > {SANE_MAX_MM}mm "
+                      f"— 점 오매칭/기준 불일치 의심, 움직이지 않고 정지")
     if SRC[src]["moving"] == "wall":
         dmm = -dmm                     # 벽이 로봇과 함께 움직이는 카메라: Δ 를 없애려면 반대로
     return {"src": src, "dpx": dpx, "dang_img": dang, "dmm": (float(dmm[0]), float(dmm[1])), "drz": rsign * dang,
