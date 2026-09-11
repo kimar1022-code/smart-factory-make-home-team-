@@ -36,6 +36,11 @@ if ! pgrep -f "ref_view.p[y]" >/dev/null 2>&1; then
   nohup python3 "$HOME/bf2_console/tools/ref_view.py" > "$HOME/bf2_console/logs/ref_view.log" 2>&1 &
   echo "  ★9/7 기준점 뷰 기동(:8777, 손목캠에 단계별 기준점 오버레이)"
 fi
+# ★9/11 글로벌캠: 비전 PC(192.168.20.30)가 HMV1/UDP 21031 로 쏘는 셀 탑뷰 → :8779 MJPEG 중계(콘솔 '글로벌캠' 패널)
+if ! pgrep -f "global_udp_ca[m].py" >/dev/null 2>&1; then
+  nohup python3 "$HOME/bf2_console/global_udp_cam.py" > "$HOME/bf2_console/logs/global_udp_cam.log" 2>&1 &
+  echo "  ★9/11 글로벌캠 UDP 중계 기동(:8779, /stream /snap /health)"
+fi
 if ! pgrep -f "house_cycle.p[y]" >/dev/null 2>&1; then
   nohup python3 "$HOME/bf2_console/tools/house_cycle.py" > "$HOME/bf2_console/logs/house_cycle.log" 2>&1 &
   echo "  ★9/6 재설계 사이클 서버 기동(:8776, 버튼: 티칭·사이클·하강·중단)"
