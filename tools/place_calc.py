@@ -20,6 +20,10 @@ import numpy as np
 
 sys.path.insert(0, "/home/ar/bf2_console/tools")
 import house_geometry as HG
+try:
+    import refpts_overlay as _RO      # ★9/12 기준점 오버레이(표시 전용)
+except Exception:
+    _RO = None
 
 BR = "http://127.0.0.1:8765"
 CAL = "/home/ar/bf2_console/dot_calib.json"
