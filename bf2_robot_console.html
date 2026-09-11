@@ -198,25 +198,6 @@ textarea{width:100%;min-height:220px;font:18px var(--mono);border:1px solid #3A4
     <button class="danger" title="동결(관절상태 멈춤·이동 전부 ABORTED) 시: 펜던트 ⚠ Clear 후 이 버튼 — 스택 자동 재기동(~2분)" onclick="if(confirm('FR5 복구(fr5_rescue.sh)를 실행할까요?\n\n※ 펜던트(192.168.58.2)에 빨간 ⚠ 가 있으면 먼저 Clear!\n스택을 내렸다 올리므로 약 2분 걸립니다.'))fetch(state.bridge+'/rescue/fr5',{method:'POST'}).then(r=>r.json()).then(j=>log('sys','fr5 rescue',JSON.stringify(j))).catch(e=>log('err','fr5 rescue',e+''))">🚑 복구</button>
     <label>현재</label><span id="fr5-manual" style="font:800 22px var(--mono);color:var(--muted)">자동</span>
   </div>
-  <h2 style="cursor:pointer" onclick="var d=this.nextElementSibling;d.style.display=(d.style.display==='none'?'':'none')">도트 정렬 <span style="font:14px var(--mono);color:var(--muted)">▸ 옛 방식(사이클로 대체) — 클릭해서 펼치기</span></h2>
-  <div style="display:none">
-  <div class="inline">
-    <select id="dot-st" title="pick: 랙에서 벽 3점 절대각+XY / place: 지금 자세에서 벽 양끝선 vs 기둥선(노랑-빨강) 상대각, yaw 만"><option value="pick">pick</option><option value="place">place</option></select>
-    <select id="dot-kind" title="점 색 = 부품 (8/26 스티커: 흰벽 파랑/노랑 · 검은벽 빨강/초록/노랑)"><option value="red">🔴 red</option><option value="green">🟢 green</option><option value="yellow">🟡 yellow</option><option value="blue">🔵 blue</option><option value="white">⚪ white</option></select>
-    <button class="primary" title="observe 이동 → 점 관측 → yaw 회전 → XY 보정(최대 2회) → 잔차 보고. 하강·파지는 안 함" onclick="cmd('fr5','dot_align',dotBody())">🎯 정렬</button>
-    <button title="지금 부품 위치·자세를 이 색의 기준으로 dot_calib.json 에 저장 — 부품을 슬롯에 똑바로 꽂은 상태에서만!" onclick="if(confirm('['+$('dot-kind').value+'] 지금 부품 위치를 도트 정렬 기준으로 저장할까요?\n(부품이 슬롯에 똑바로 꽂힌 상태여야 합니다)'))cmd('fr5','dot_align',Object.assign({ref:1},dotBody()))">📌 기준 저장</button>
-    <button title="수동으로 그리퍼를 이 색 벽의 파지 위치에 놓은 상태에서 — 관측 자세 기준 상대 오프셋으로 기록" onclick="if(confirm('['+$('dot-kind').value+'] 지금 그리퍼 위치를 이 벽의 pick 자세(관측 기준 오프셋)로 저장할까요?'))cmd('fr5','dot_pick_teach',{kind:$('dot-kind').value})">✋ pick 티칭</button>
-    <button class="primary" title="정렬(Δ·yaw) → 오프셋으로 벽 위 접근 → 하강 → 그리퍼 닫기 → 실측 게이트(헛집음이면 오류)" onclick="if(confirm('['+$('dot-kind').value+'] 정렬 후 접근·하강·파지까지 실행할까요?'))cmd('fr5','dot_pick',{kind:$('dot-kind').value})">🤏 정렬+파지</button>
-    <button title="z400 정지 상태에서 확인 후 하강 진행" onclick="cmd('fr5','dot_pick_continue',{})">▶ 하강</button>
-    <button title="파지 직전 정지 상태에서 5mm 더 깊이 하강(추가분은 pick 오프셋에 영구 반영)" onclick="cmd('fr5','dot_grip_deeper',{mm:5})">▼ 더</button>
-    <button title="파지 직전 정지 상태에서 그리퍼 닫기 진행" onclick="cmd('fr5','dot_pick_continue',{})">▶ 잡기</button>
-  </div>
-  <div class="inline" title="place(밑판 삽입) — 8/27: 1차 기둥선(yaw+XY) → 호버 2차 → ★삽입 전 무조건 정지">
-    <button title="벽을 물고 손으로 '삽입된 자세'에 놓은 상태에서 — 삽입 TCP·오프셋 기록 → 호버 기준·축척 → observe_place 기둥선 기준·손목각 학습" onclick="if(confirm('['+$('dot-kind').value+'] 지금 자세를 이 벽의 삽입 자세로 티칭할까요? (벽을 물고 슬롯에 꽂힌 상태여야 함)'))cmd('fr5','dot_place_teach',{kind:$('dot-kind').value})">📌 place 티칭</button>
-    <button class="primary" title="벽을 물고: observe_place → 기둥선 정렬 → 호버 2차 보정 → 정지(삽입 신호 대기)" onclick="if(confirm('['+$('dot-kind').value+'] place 정렬 후 호버까지 이동할까요? (삽입은 [▶ 삽입] 을 눌러야 진행)'))cmd('fr5','dot_place',{kind:$('dot-kind').value})">🏠 place 정렬</button>
-    <button title="호버 정지 상태에서 눈으로 확인 후 2% 하강·그리퍼 열기·후퇴" onclick="if(confirm('삽입을 진행할까요? (2% 하강 → 그리퍼 열기 → 후퇴)'))cmd('fr5','dot_place_continue',{})">▶ 삽입</button>
-  </div>
-  </div>
   <h2>그리퍼</h2>
   <div class="inline">
     <label>열린 정도</label>
@@ -304,16 +285,6 @@ textarea{width:100%;min-height:220px;font:18px var(--mono);border:1px solid #3A4
     <button onclick="recAdd('fr5')">＋ FR5</button>
     <button onclick="recAddWait()">＋ Wait</button>
     <input id="rec-wait" type="number" value="1" step="0.5" min="0.1" style="width:64px"><label>초</label></div>
-  <div class="inline" data-legacy="1" style="display:none">
-    <button class="primary" onclick="recAddDot()" title="손목캠 도트 방식 자동 파지 — 관측 3점 정렬 → z380 2차 정렬 → 하강 → 파지(상태코드 확인)">＋ 도트 파지</button>
-    <select id="rec-dot-kind" style="width:96px">
-      <option value="blue">파랑</option><option value="green">초록</option>
-      <option value="red">빨강</option><option value="yellow">노랑</option></select>
-    <label>정지 z</label><input id="rec-dot-z" type="number" value="380" step="5" style="width:70px">
-    <label title="체크 해제 시 z380에서 멈추고 [▶ 하강] 을 눌러야 진행"><input id="rec-dot-auto" type="checkbox" checked> 자동하강</label>
-    <label title="파지 직전에도 멈춰서 [▼ 더]/[▶ 잡기] 확인"><input id="rec-dot-gp" type="checkbox"> 파지정지</label>
-    <button onclick="recAddPlace()" title="벽을 물고 밑판에 삽입 — 호버에서 무조건 정지, [▶ 삽입] 을 눌러야 진행(자동 없음)">＋ 도트 place</button>
-  </div>
   <div class="inline">
     <select id="rec-pose" style="min-width:190px"></select>
     <button onclick="recAddPose()">＋ Saved Pose</button>
@@ -328,14 +299,6 @@ textarea{width:100%;min-height:220px;font:18px var(--mono);border:1px solid #3A4
     <button onclick="recDel()">✕ Delete</button>
     <button onclick="recNew()">⧉ New</button>
     <button class="primary" onclick="recSaveAs()">Save</button></div>
-  <details style="margin-top:10px;border-top:1px solid var(--line);padding-top:8px">
-    <summary style="cursor:pointer;color:var(--muted);font:700 14px var(--mono)">옛 방식 (지금은 사이클로 제어 — 보관용)</summary>
-    <div class="inline" style="margin-top:6px">
-      <b style="color:var(--muted);font:700 15px var(--mono)">🧱 벽 꽂기 플레이어</b>
-      <button id="wp-toggle" onclick="wpToggle()">열기</button>
-      <span style="font:12px var(--mono);color:var(--muted)">세션 없이 색 버튼으로 삽입(:8770 — 지금 미기동)</span></div>
-    <iframe id="wallplayer" style="display:none;width:100%;height:430px;border:1px solid var(--line);border-radius:6px;background:#111;margin-top:6px"></iframe>
-  </details>
   </div>
 </section>
 </main>
@@ -674,9 +637,6 @@ function renderPoses(){
 
 /* ---------- 전체 정지 ---------- */
 function scStop(){state.abort=true;for(const k of['zk1','zk2','fr5'])cmd(k,'stop')}
-function wpToggle(){const f=$('wallplayer'),b=$('wp-toggle');
-  if(f.style.display==='none'){if(!f.getAttribute('src'))f.src='http://'+(location.hostname||'localhost')+':8770/';f.style.display='block';b.textContent='닫기'}
-  else{f.style.display='none';b.textContent='열기'}}
 $('estop').onclick=scStop;
 
 /* ---------- 비전 파지 (잠금) ----------
@@ -763,15 +723,6 @@ function recAddPose(){const p=state.poses[+$('rec-pose').value];if(!p)return;
   const at=rec.sel>=0?rec.sel+1:rec.steps.length;rec.steps.splice(at,0,s);rec.sel=at;recRender()}
 /* 8/27 도트 파지 스텝 — 오늘 완성한 dot_pick 파이프라인을 Recorder 에 연결.
    (기존 'vision' 스텝은 8/17 비전팀 협의(production_valid) 잠금 그대로 두고 별도 타입으로 둔다) */
-function recAddDot(){
-  const s={t:'dot',robot:'fr5',kind:$('rec-dot-kind').value,
-           pz:+$('rec-dot-z').value||380, auto:$('rec-dot-auto').checked, gp:$('rec-dot-gp')?.checked||false};
-  const at=rec.sel>=0?rec.sel+1:rec.steps.length;
-  rec.steps.splice(at,0,s);rec.sel=at;recRender()}
-function recAddPlace(){
-  const s={t:'dotplace',robot:'fr5',kind:$('rec-dot-kind').value};
-  const at=rec.sel>=0?rec.sel+1:rec.steps.length;
-  rec.steps.splice(at,0,s);rec.sel=at;recRender()}
 function recAddWait(){const at=rec.sel>=0?rec.sel+1:rec.steps.length;
   rec.steps.splice(at,0,{t:'wait',sec:+$('rec-wait').value||1});rec.sel=at;recRender()}
 function recMove(d){const i=rec.sel,j=i+d;if(i<0||j<0||j>=rec.steps.length)return;
@@ -1240,13 +1191,6 @@ $('mode-seg').querySelectorAll('button').forEach(b=>b.onclick=async()=>{
   setModeUI()});
 /* 브리지 주소 = 이 페이지를 연 호스트(:8765) — 어느 PC 에서 열어도 자동으로 맞는다 */
 $('bridge-url').value=`http://${location.hostname||'localhost'}:8765`;
-/* 8/26: 도트 정렬 요청 본문 — place 는 "지금 자세"가 observe(벽 든 채 기둥 위) + 기둥선 = 노랑-빨강 */
-function dotBody(){const st=$('dot-st').value,k=$('dot-kind').value,b={kind:k,station:st};
-  /* 벽 색 → 기둥선 색 (8/26 사용자 지정): 파란 흰벽=노랑·빨강 기둥, 초록 검은벽=파랑·초록 기둥 */
-  const LINE={blue:['yellow','red'],green:['blue','green']};
-  /* place 관측 자세는 dot_calib.json observe_place_joints(8/26 z780 탑다운, 마커+4기둥 전부 보임)가 정본 — 현재 자세를 안 보냄 */
-  if(st==='place'){if(LINE[k])b.line_kinds=LINE[k];else log('sys','dot_align',k+' 벽의 기둥선 색 미지정 — 절대각으로 동작')}
-  return b}
 /* ★9/12 도킹 탭: 사이클(:8776) / 리코더 — 고른 것만 그 자리에 표시(선택은 localStorage 기억) */
 function dockMode(m){
   try{localStorage.setItem('dock.mode',m)}catch(e){}
