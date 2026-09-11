@@ -816,7 +816,11 @@ def stage_carry_hover(color, T):
                 for D in per.values(): log(f"  (참고) {HA.fmt(D)}")
             except Exception as ex: log(f"  (참고 측정 실패: {ex})")
             log(f"  정렬 카메라: {srcs} 역할 {roles or 'both'}")
-        HA.align(color, srcs=srcs, roles=roles)                # 부품(지정 카메라·역할, 수렴/발산/불일치 게이트)
+        HA.EXPECT_TCP = [T["x"], T["y"]]                       # ★9/11: 예측 이동 매칭의 기준점 = 이번 계산 목표
+        try:
+            HA.align(color, srcs=srcs, roles=roles)            # 부품(지정 카메라·역할, 수렴/발산/불일치 게이트)
+        finally:
+            HA.EXPECT_TCP = None
         post_align_offset(color)
         rz_measure_check(color)
         A["done"] = True
