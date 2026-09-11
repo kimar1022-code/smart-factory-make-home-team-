@@ -166,6 +166,7 @@ ALIGN_SRCS = {"blue": ("newcam",)}                # 색별 정렬 카메라(없�
 # 14:33 실기: 랙 비틀림(죠 안 +0.99°)을 새카메라 1점이 못 봐 사용자 2.35mm/0.32° 조그. 손목캠 벽 2점이 죠 안 회전을 보지만
 #   손목캠 기준(13:47)이 삽입 후 밀린 벽 각으로 찍혀 rz +0.5° 편향 → 우선 "measure"(측정·성공 시 승격만) 로 한 사이클 재기준 후 "rz" 로 승격.
 RZ_MEASURE_WARN = 0.6                            # 정렬 중 손목캠이 재는 벽 회전이 이만큼 넘으면 경고(죠 안에서 벽이 돌아감 = 재파지 신호. rz 를 억지로 돌려 맞추지 않는다)
+ALIGN_MAX_MOVE_TWOCAM_MM = 15.0  # ★9/11: 두 캠 xy 색 상한(불일치 게이트가 파지 불량 담당)
 ALIGN_MAX_MOVE_MM = 4.0    # ★9/7: 정렬이 슬롯 기준에서 이만큼 넘게 옮기면 정지 — 든 벽 점(가까움)과 기둥(멀리)의 시차로 파지 오차가 2배 증폭되는 구조라, 큰 이동은 신뢰할 수 없다(재파지가 답)
 # ★9/10 사용자 지시: 파랑도 두 캠 조종으로. 새카메라 단독이던 19:07 에 혼자 4.4mm 를 끌고 가
 #   (wrist +3.28 vs newcam +5.07mm 로 2mm 갈렸는데 막을 게 없었다) 기둥을 시야 밖으로 밀어냈다.
@@ -351,10 +352,17 @@ def check_align_sanity(color, cur):
     dx = cur[0] - (ref["seat_tcp"][0] + (B.get("x", 0) - br.get("x", 0)))
     dy = cur[1] - (ref["seat_tcp"][1] + (B.get("y", 0) - br.get("y", 0)))
     d = math.hypot(dx, dy)
-    if d > ALIGN_MAX_MOVE_MM:
-        raise Gate(f"정렬 결과가 슬롯 기준(베이스 이동 반영)에서 {d:.1f}mm 벗어남 (dx {dx:+.1f} dy {dy:+.1f}, 허용 {ALIGN_MAX_MOVE_MM}) — "
+    # ★9/11 사용자 지시("베이스가 움직여도 돌게·바꿔봐"): 두 카메라가 xy 로 같이 보는 색은 상한 15mm.
+    #   4mm 는 '파지 오차 2배 증폭' 감지용인데, 베이스 측정 오차(rms 2.3 → 5~7mm)도 같이 막아 매번 재티칭하게 만들었다.
+    #   파지 불량은 두 캠이 다른 값(COMBINE_TOL_MM 1.5mm 불일치)을 내서 align() 안에서 잡힌다 — 베이스 이동은 두 캠이 같은 값(실측 0.1mm).
+    #   단일 카메라 색(red_s·red_in)은 교차검증이 없어 4mm 유지.
+    roles = ALIGN_ROLES.get(color) or {}
+    n_xy = sum(1 for r in roles.values() if r == "xy")
+    lim = ALIGN_MAX_MOVE_TWOCAM_MM if n_xy >= 2 else ALIGN_MAX_MOVE_MM
+    if d > lim:
+        raise Gate(f"정렬 결과가 슬롯 기준(베이스 이동 반영)에서 {d:.1f}mm 벗어남 (dx {dx:+.1f} dy {dy:+.1f}, 허용 {lim}, xy캠 {n_xy}) — "
                    f"파지가 기준과 많이 달라 정렬이 시차로 증폭했을 수 있음. 다시 집는 것을 권함")
-    log(f"  정렬 온전성: 슬롯 기준 대비 {d:.2f}mm (허용 {ALIGN_MAX_MOVE_MM})")
+    log(f"  정렬 온전성: 슬롯 기준 대비 {d:.2f}mm (허용 {lim}, xy캠 {n_xy})")
 
 
 def rz_measure_check(color):

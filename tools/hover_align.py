@@ -70,6 +70,7 @@ SCALE_TOL, RMS_TOL_PX = 0.03, 6.0
 MAX_STEP_MM, MAX_STEP_DEG = 3.0, 0.5
 TOL_MM, TOL_DEG = 0.3, 0.15
 COMBINE_TOL_MM, COMBINE_TOL_DEG = 1.5, 0.6
+FAR_STEP_MM = 4.0   # ★9/11: 두 캠이 같은 방향으로 이만큼 넘게 멀면 불일치 판정을 보류하고 다가간다
 MIN_EXEC_MM = 0.8                               # 로봇 최소 실행 이동량(실측). 이보다 작은 보정은 명령해도 왜곡돼 실행된다
 MAX_ITER = 10                                   # 스텝 ≤3mm 라 20mm 급 초기 오차(회전 중심 버그 전) 도 수렴하게
 # ★z440 노출: 관측자세(z650)용 417 이면 가까워진 기둥 점이 하얗게 날아간다(9/6 00:5x 라이브: 노랑 S4·V255, 파랑 H90·V251 → 검출 0).
@@ -226,7 +227,11 @@ def wall_dots(img, color, ref=None, seeds=None, src="wrist"):
 #   위험은 하나 — 바로 옆 벽 점 오인(실측 34.9px = 6.4mm 떨어져 색·면적까지 비슷). 그래서 아래 두 게이트를 건다.
 PILLAR_PICK_F = "/home/ar/bf2_console/state/house/pillar_pick.json"  # 색/캠별 '진짜 기둥' 위치(사용자 지정)
 SINGLE_SEARCH_PX = 15.0     # 기준 특징 1개일 때 매칭 반경 — 이웃 벽 점(34.9px)을 확실히 배제
-SINGLE_AREA_LO, SINGLE_AREA_HI = 0.6, 1.6   # 기준 면적 대비 허용(조각남·뭉침 배제)
+SINGLE_AREA_BY_SRC = {"wrist": (0.6, 1.6), "newcam": (0.4, 2.5)}   # 기준 면적 대비 허용(다른 점 오인 방어)
+#   ★9/11 사용자 설계 원칙: "기준 점이 그 자리에, 같은 거리·yaw" — 신원은 예측 위치 SINGLE_SEARCH_PX 안 + 면적으로 본다.
+#   손목캠(수직)은 면적이 안정 → 0.6~1.6 엄격 유지(red_s·red_in 은 손목캠 단독이라 교차검증이 없어 여기서 막아야 한다).
+#   새카메라(팔에 비스듬)는 6mm 이동에 면적 58%(340/584) 로 변함(실측, 위치는 예측 8px 안) → 0.4~2.5. 항상 손목캠과 짝이라 1.5mm 불일치 게이트가 받친다.
+SINGLE_AREA_LO, SINGLE_AREA_HI = 0.6, 1.6   # 기본(등록 안 된 소스)
 PICK_TOL_PX = 45.0          # 저장 시 화이트리스트 좌표에서 이만큼 안의 점만 기둥으로 인정
 
 
@@ -573,9 +578,12 @@ def delta(ref, meas, z_tcp, rz_tcp, src="wrist", tcp_now=None):
         # ★이웃 벽 점 오인 방어: 면적이 기준과 크게 다르면 다른 점을 문 것으로 본다.
         rc, rx, ry, ra = ref["pillars"][0]
         got = min(meas["pillars"], key=lambda q: math.hypot(q[1] - d_[0][0], q[2] - d_[0][1]))
-        if ra and not (SINGLE_AREA_LO * ra <= got[3] <= SINGLE_AREA_HI * ra):
+        lo_, hi_ = SINGLE_AREA_BY_SRC.get(src, (SINGLE_AREA_LO, SINGLE_AREA_HI))
+        if ra and not (lo_ * ra <= got[3] <= hi_ * ra):
             return None, (f"[{src}] 기둥 면적 {int(got[3])} 이 기준 {int(ra)} 의 "
-                          f"{SINGLE_AREA_LO:.0%}~{SINGLE_AREA_HI:.0%} 밖 — 다른 점을 문 것으로 보고 정지")
+                          f"{lo_:.0%}~{hi_:.0%} 밖 — 다른 점을 문 것으로 보고 정지")
+        if ra and not (0.6 * ra <= got[3] <= 1.6 * ra):
+            print(f"  ⚠ [{src}] 기둥 면적 {int(got[3])}/{int(ra)} ({got[3]/ra:.0%}) — 위치는 예측 안, 시야각 차로 보고 진행", flush=True)
         lab = lab + [f"(기둥1: {rc} 면적 {int(got[3])}/{int(ra)}, 반경 {SINGLE_SEARCH_PX:.0f}px)"]
     if len(s_) < 1:
         return None, f"[{src}] 베이스 특징 매칭 {len(s_)}개(1 이상 필요) — 후보 {[(c, round(x), round(y)) for c, x, y, a in meas['pillars']]}"
@@ -910,6 +918,24 @@ def check(color, srcs=None, roles=None):
             A, B_ = per[xy_keys[i]], per[xy_keys[j]]
             dd = math.dist(A["dmm"], B_["dmm"])
             if dd > COMBINE_TOL_MM:
+                # ★9/11 사용자 지시("기준 화면을 찾아가라"): 매핑 오차는 기준 자리에서 멀수록 커진다
+                #   (9/10 실측: 3.4mm 밖 불일치 1.5~1.9 / 기준 자리 0.099). 멀리서 판정하면 항상 걸린다.
+                #   두 캠이 '같은 방향·크기 2배 이내' 이고 둘 다 FAR_STEP_MM 넘게 멀면 = 점 오인이 아니라 거리 탓
+                #   → 작은 쪽 벡터로 한 발 다가가 재측정(불일치 게이트는 가까워진 뒤 그대로 적용). 방향이 다르면 즉시 정지(점 오인).
+                a = math.hypot(*A["dmm"]); b = math.hypot(*B_["dmm"])
+                dot = A["dmm"][0]*B_["dmm"][0] + A["dmm"][1]*B_["dmm"][1]
+                same_dir = a > 0 and b > 0 and dot / (a*b) > 0.85
+                # 불일치는 거리에 비례해 준다(15:37 실측 노랑: 거리 7.7→5 에 3.4→2.7, 약 40%) — 두 캠 배율이 서로 어긋난 것.
+                #   허용 = max(1.5, 0.5×작은 쪽 거리): 기준 자리에선 1.5mm 그대로, 멀면 다가가며 재판정.
+                # 15:43 실측(노랑 rz91): 불일치가 거리에 비례하지 않고 새캠≈손목×1.8 로 배율만 다르다(기준은 같은 프레임 0.046mm 일치).
+                #   배율 차는 종점을 바꾸지 않는다(두 기준이 같은 프레임 → 둘 다 0 이 되는 자리는 하나). 멀리서는 방향·배율(2배 이내)만 검사.
+                tol_here = max(COMBINE_TOL_MM, 0.5 * min(a, b))
+                if same_dir and max(a, b) <= 2.0 * min(a, b) and min(a, b) > COMBINE_TOL_MM:
+                    small = A if a <= b else B_
+                    print(f"  ⚠ 카메라 불일치 {dd:.2f}mm (허용 {tol_here:.2f}=거리 {min(a,b):.1f}mm 의 절반) 같은 방향 → 작은 쪽({small['src']})으로 다가가 재측정", flush=True)
+                    per_far = {small["src"]: small}
+                    C = {"dmm": tuple(small["dmm"]), "drz": 0.0, "n_src": 1, "rz_from": "보류(멀다)", "far": True}
+                    return C, per, None
                 return None, per, f"카메라 불일치({xy_keys[i]}↔{xy_keys[j]}) XY {dd:.2f}mm — 매핑/기준 의심, 정지"
     xs = [per[k]["dmm"] for k in xy_keys]
     mx = sum(v[0] for v in xs) / len(xs); my = sum(v[1] for v in xs) / len(xs)
@@ -940,10 +966,27 @@ def align(color, dry=False, tol_mm=TOL_MM, tol_deg=TOL_DEG, srcs=None, roles=Non
     """보정 루프. 수렴 True / dry False / 실패 예외(호출자가 정지·보고). srcs 로 카메라 지정, roles 로 역할(xy/rz/both/measure)."""
     prev = None
     check.expo_done = False
+    rz_fixed = False
     for it in range(MAX_ITER):
         C, per, why = check(color, srcs, roles)
         for D in per.values():
             print(f"  호버정렬 {it}: {fmt(D)}", flush=True)
+        if C is None and (not rz_fixed) and ("불일치" in (why or "")) and not dry:
+            # ★9/11 사용자 지시("멈추지 말고 자동으로 맞춰라"): 두 캠 불일치가 rz 차이에서 오는 경우가 실측됨
+            #   (노랑: rz 기준 +91.01 / 지금 +91.93 → 새카메라가 TCP 축에서 떨어져 호를 그려 2.6mm 편차, rz 되돌리자 1.97→0.99mm).
+            #   점 1개 카메라는 rz 를 못 재므로, 기준 rz 와 0.3° 넘게 다르면 한 번 기준 rz 로 돌리고 재측정한다(정렬 루프의 rz 스텝과 같은 동작).
+            try:
+                refs = json.load(open(REF)).get(color) or {}
+                rz_ref = next((v["tcp"][5] for v in refs.values() if isinstance(v, dict) and v.get("tcp")), None)
+                rz_now = st()["tcp"][5]
+                d_rz = HG.wrap_deg(rz_ref - rz_now) if rz_ref is not None else 0.0
+            except Exception as e:
+                rz_ref, d_rz = None, 0.0
+            rz_fixed = True
+            if rz_ref is not None and 0.3 < abs(d_rz) <= 3.0:
+                print(f"  ⚠ 두 캠 불일치 + rz 가 기준과 {d_rz:+.2f}° 다름 → 기준 rz {rz_ref:+.2f} 로 돌리고 재측정", flush=True)
+                move_rel(0.0, 0.0, d_rz); time.sleep(0.8)
+                continue
         if C is None:
             raise RuntimeError("호버 정렬 측정 실패: " + why)
         e_mm = math.hypot(*C["dmm"]); e_deg = abs(C["drz"])
