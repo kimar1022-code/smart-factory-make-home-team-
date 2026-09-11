@@ -69,6 +69,7 @@ HELD_AMIN_BY_COLOR = {"yellow_in": 150}
 SCALE_TOL, RMS_TOL_PX = 0.03, 6.0
 MAX_STEP_MM, MAX_STEP_DEG = 3.0, 0.5
 TOL_MM, TOL_DEG = 0.3, 0.15
+EXPECT_TCP = None   # ★9/11: 이번 사이클의 계산 목표 [x,y] — 예측 이동 매칭의 기준점(house_cycle 이 정렬 전에 세팅)
 COMBINE_TOL_MM, COMBINE_TOL_DEG = 1.5, 0.6
 FAR_STEP_MM = 4.0   # ★9/11: 두 캠이 같은 방향으로 이만큼 넘게 멀면 불일치 판정을 보류하고 다가간다
 MIN_EXEC_MM = 0.8                               # 로봇 최소 실행 이동량(실측). 이보다 작은 보정은 명령해도 왜곡돼 실행된다
@@ -543,7 +544,10 @@ def _pred_shift_px(ref, z_tcp, rz_tcp, src, tcp_now):
       예측 = J · Δ로봇 (J = Jinv 의 역, mm→px)
     실측 검증(16:18 자리): Δ로봇 (+2.70,−2.04)mm → 예측 (+11.2,−14.6)px, 실측 (+7,−14)px → 잔차 4.2px.
     벽 점은 로봇과 함께 움직이므로 **밀지 않는다** — 기둥(베이스 특징)에만 적용."""
-    rt = ref.get("tcp")
+    # ★9/11 16:16 A 파랑 정지: 베이스가 (−2.4,+0.8) 움직여 로봇이 따라간 자리에선 기둥이 **기준 픽셀 그대로** 보이는데
+    #   (기준 자리 대비 Δ로봇)로 예측하면 13px 엉뚱한 곳을 뒤져 4px 옆의 진짜 기둥을 놓친다.
+    #   예측의 기준점 = "이번 사이클의 계산 목표"(EXPECT_TCP, house_cycle 이 넘김). 없으면 기준 자리.
+    rt = EXPECT_TCP if EXPECT_TCP else ref.get("tcp")
     if not rt or not tcp_now:
         return (0.0, 0.0)
     d_mm = np.array([tcp_now[0] - rt[0], tcp_now[1] - rt[1]], float)
@@ -572,6 +576,13 @@ def delta(ref, meas, z_tcp, rz_tcp, src="wrist", tcp_now=None):
               f"[{src}] 기둥 예상 이동 ({sx:+.0f},{sy:+.0f})px 만큼 옮겨서 찾는다)", flush=True)
     s_, d_, lab = match_feats(ref_p, meas["pillars"],
                               SINGLE_SEARCH_PX if single else DET[src]["search"])
+    if (sx or sy) and not s_:
+        # 예측 자리에 없으면 '베이스가 움직여 로봇이 따라간 경우'(기둥은 기준 픽셀 그대로) — 이동 없이 한 번 더
+        s_, d_, lab = match_feats(ref["pillars"], meas["pillars"],
+                                  SINGLE_SEARCH_PX if single else DET[src]["search"])
+        if s_:
+            print(f"  ([{src}] 예측 자리엔 없고 기준 픽셀 자리에서 찾음 — 베이스 이동을 로봇이 따라간 경우)", flush=True)
+            sx = sy = 0.0
     if sx or sy:
         s_ = [(x - sx, y - sy) for x, y in s_]      # ★sim 은 반드시 '원래 기준 픽셀 → 지금' 이어야 한다
     if single and s_:
