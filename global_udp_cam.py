@@ -116,7 +116,11 @@ class H(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path, _, q = self.path.partition("?")
-        qs = dict(p.split("=", 1) for p in q.split("&") if "=" in p)
+        # 콘솔 camPanel 이 URL 뒤에 '?t=...' 를 덧붙여 '/stream?w=640?t=123' 이 온다(9/11 실측) → '?' 도 구분자로
+        qs = {}
+        for p in q.replace("?", "&").split("&"):
+            if "=" in p:
+                k, v = p.split("=", 1); qs[k] = "".join(ch for ch in v if ch.isdigit()) if k == "w" else v
         if path == "/health":
             with lock:
                 age = None if latest["t"] == 0 else round(time.time() - latest["t"], 2)
