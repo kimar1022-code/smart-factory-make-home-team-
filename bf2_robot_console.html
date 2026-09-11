@@ -198,7 +198,8 @@ textarea{width:100%;min-height:220px;font:18px var(--mono);border:1px solid #3A4
     <button class="danger" title="동결(관절상태 멈춤·이동 전부 ABORTED) 시: 펜던트 ⚠ Clear 후 이 버튼 — 스택 자동 재기동(~2분)" onclick="if(confirm('FR5 복구(fr5_rescue.sh)를 실행할까요?\n\n※ 펜던트(192.168.58.2)에 빨간 ⚠ 가 있으면 먼저 Clear!\n스택을 내렸다 올리므로 약 2분 걸립니다.'))fetch(state.bridge+'/rescue/fr5',{method:'POST'}).then(r=>r.json()).then(j=>log('sys','fr5 rescue',JSON.stringify(j))).catch(e=>log('err','fr5 rescue',e+''))">🚑 복구</button>
     <label>현재</label><span id="fr5-manual" style="font:800 22px var(--mono);color:var(--muted)">자동</span>
   </div>
-  <h2>도트 정렬 <span style="font:14px var(--mono);color:var(--muted)">3점: 가운데=파지·양끝=yaw</span></h2>
+  <h2 style="cursor:pointer" onclick="var d=this.nextElementSibling;d.style.display=(d.style.display==='none'?'':'none')">도트 정렬 <span style="font:14px var(--mono);color:var(--muted)">▸ 옛 방식(사이클로 대체) — 클릭해서 펼치기</span></h2>
+  <div style="display:none">
   <div class="inline">
     <select id="dot-st" title="pick: 랙에서 벽 3점 절대각+XY / place: 지금 자세에서 벽 양끝선 vs 기둥선(노랑-빨강) 상대각, yaw 만"><option value="pick">pick</option><option value="place">place</option></select>
     <select id="dot-kind" title="점 색 = 부품 (8/26 스티커: 흰벽 파랑/노랑 · 검은벽 빨강/초록/노랑)"><option value="red">🔴 red</option><option value="green">🟢 green</option><option value="yellow">🟡 yellow</option><option value="blue">🔵 blue</option><option value="white">⚪ white</option></select>
@@ -214,6 +215,7 @@ textarea{width:100%;min-height:220px;font:18px var(--mono);border:1px solid #3A4
     <button title="벽을 물고 손으로 '삽입된 자세'에 놓은 상태에서 — 삽입 TCP·오프셋 기록 → 호버 기준·축척 → observe_place 기둥선 기준·손목각 학습" onclick="if(confirm('['+$('dot-kind').value+'] 지금 자세를 이 벽의 삽입 자세로 티칭할까요? (벽을 물고 슬롯에 꽂힌 상태여야 함)'))cmd('fr5','dot_place_teach',{kind:$('dot-kind').value})">📌 place 티칭</button>
     <button class="primary" title="벽을 물고: observe_place → 기둥선 정렬 → 호버 2차 보정 → 정지(삽입 신호 대기)" onclick="if(confirm('['+$('dot-kind').value+'] place 정렬 후 호버까지 이동할까요? (삽입은 [▶ 삽입] 을 눌러야 진행)'))cmd('fr5','dot_place',{kind:$('dot-kind').value})">🏠 place 정렬</button>
     <button title="호버 정지 상태에서 눈으로 확인 후 2% 하강·그리퍼 열기·후퇴" onclick="if(confirm('삽입을 진행할까요? (2% 하강 → 그리퍼 열기 → 후퇴)'))cmd('fr5','dot_place_continue',{})">▶ 삽입</button>
+  </div>
   </div>
   <h2>그리퍼</h2>
   <div class="inline">
@@ -280,7 +282,16 @@ textarea{width:100%;min-height:220px;font:18px var(--mono);border:1px solid #3A4
 
 <!-- Recorder 상시 도킹 (SO-ARM 관제탑 Recorder 동일 컨셉: 현재 자세 캡처 → 순차 재생) -->
 <section class="panel" id="dock-report">
-  <h2 style="margin-top:0">RECORDER</h2>
+  <!-- ★9/12: 한 콘솔에서 보도록 도킹 탭. 사이클(:8776) / 리코더 중 고른 것이 이 자리에 뜬다. -->
+  <h2 style="margin-top:0;display:flex;align-items:center;gap:8px">
+    <span id="dock-title">사이클</span>
+    <span style="margin-left:auto;display:flex;gap:4px">
+      <button id="dock-tab-cycle" onclick="dockMode('cycle')" title="집 사이클(:8776) — 베이스→랙→파지→운반→정렬→하강">사이클</button>
+      <button id="dock-tab-rec"   onclick="dockMode('rec')"   title="자세 캡처·순차 재생 레코더">리코더</button>
+      <button onclick="dockReload()" title="새로고침">⟳</button>
+    </span></h2>
+  <div id="dock-cycle"><iframe id="cycleframe" style="width:100%;height:640px;border:1px solid var(--line);border-radius:6px;background:#111"></iframe></div>
+  <div id="dock-rec" style="display:none">
   <div class="inline"><input id="rec-name" value="Untitled" style="width:130px">
     <span id="rec-count" style="font:18px var(--mono);color:var(--muted)">0 스텝</span>
     <select id="rec-list" style="min-width:120px"></select>
@@ -293,7 +304,7 @@ textarea{width:100%;min-height:220px;font:18px var(--mono);border:1px solid #3A4
     <button onclick="recAdd('fr5')">＋ FR5</button>
     <button onclick="recAddWait()">＋ Wait</button>
     <input id="rec-wait" type="number" value="1" step="0.5" min="0.1" style="width:64px"><label>초</label></div>
-  <div class="inline">
+  <div class="inline" data-legacy="1" style="display:none">
     <button class="primary" onclick="recAddDot()" title="손목캠 도트 방식 자동 파지 — 관측 3점 정렬 → z380 2차 정렬 → 하강 → 파지(상태코드 확인)">＋ 도트 파지</button>
     <select id="rec-dot-kind" style="width:96px">
       <option value="blue">파랑</option><option value="green">초록</option>
@@ -317,11 +328,15 @@ textarea{width:100%;min-height:220px;font:18px var(--mono);border:1px solid #3A4
     <button onclick="recDel()">✕ Delete</button>
     <button onclick="recNew()">⧉ New</button>
     <button class="primary" onclick="recSaveAs()">Save</button></div>
-  <div class="inline" style="margin-top:10px;border-top:1px solid var(--line);padding-top:8px">
-    <b style="color:var(--muted);font:700 15px var(--mono)">🧱 벽 꽂기 플레이어</b>
-    <button id="wp-toggle" onclick="wpToggle()">열기</button>
-    <span style="font:12px var(--mono);color:var(--muted)">세션 없이 색 버튼으로 삽입(:8770)</span></div>
-  <iframe id="wallplayer" style="display:none;width:100%;height:430px;border:1px solid var(--line);border-radius:6px;background:#111;margin-top:6px"></iframe>
+  <details style="margin-top:10px;border-top:1px solid var(--line);padding-top:8px">
+    <summary style="cursor:pointer;color:var(--muted);font:700 14px var(--mono)">옛 방식 (지금은 사이클로 제어 — 보관용)</summary>
+    <div class="inline" style="margin-top:6px">
+      <b style="color:var(--muted);font:700 15px var(--mono)">🧱 벽 꽂기 플레이어</b>
+      <button id="wp-toggle" onclick="wpToggle()">열기</button>
+      <span style="font:12px var(--mono);color:var(--muted)">세션 없이 색 버튼으로 삽입(:8770 — 지금 미기동)</span></div>
+    <iframe id="wallplayer" style="display:none;width:100%;height:430px;border:1px solid var(--line);border-radius:6px;background:#111;margin-top:6px"></iframe>
+  </details>
+  </div>
 </section>
 </main>
 
@@ -1232,6 +1247,20 @@ function dotBody(){const st=$('dot-st').value,k=$('dot-kind').value,b={kind:k,st
   /* place 관측 자세는 dot_calib.json observe_place_joints(8/26 z780 탑다운, 마커+4기둥 전부 보임)가 정본 — 현재 자세를 안 보냄 */
   if(st==='place'){if(LINE[k])b.line_kinds=LINE[k];else log('sys','dot_align',k+' 벽의 기둥선 색 미지정 — 절대각으로 동작')}
   return b}
+/* ★9/12 도킹 탭: 사이클(:8776) / 리코더 — 고른 것만 그 자리에 표시(선택은 localStorage 기억) */
+function dockMode(m){
+  try{localStorage.setItem('dock.mode',m)}catch(e){}
+  var C=$('dock-cycle'),R=$('dock-rec'),tc=$('dock-tab-cycle'),tr=$('dock-tab-rec');
+  var on=m==='cycle';
+  C.style.display=on?'':'none'; R.style.display=on?'none':'';
+  $('dock-title').textContent=on?'사이클':'RECORDER';
+  if(tc)tc.className=on?'primary':''; if(tr)tr.className=on?'':'primary';
+  if(on){var f=$('cycleframe'); if(!f.src)f.src='http://'+(location.hostname||'localhost')+':8776/';}
+}
+function dockReload(){var m=(localStorage.getItem('dock.mode')||'cycle');
+  if(m==='cycle'){var f=$('cycleframe');f.src='http://'+(location.hostname||'localhost')+':8776/?t='+Date.now();}else{try{recRefresh&&recRefresh()}catch(e){}}}
+window.addEventListener('load',function(){try{dockMode(localStorage.getItem('dock.mode')||'cycle')}catch(e){dockMode('cycle')}});
+
 /* 8/26 카메라 플로팅 패널 2종(손목캠 :8766 · 측면캠 :8771 · 새카메라 :8768) — 이동/크기/빼기·넣기/별창, 위치·크기·표시 localStorage 기억 */
 function camPanel(id,btnId,label,streamUrl,def){
   const W=$(id),im=W.querySelector('img'),hdr=W.querySelector('.chdr'),grip=W.querySelector('.cgrip'),box=$('twinwrap');
