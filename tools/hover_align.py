@@ -74,16 +74,6 @@ LEARN_MOVE = {"blue_in", "yellow_in", "red_in"}   # 내벽 3색 — 자를 믿�
 LEARN_STEP_MM = 1.5      # 시험 이동 크기(최소 실행 이동 0.8mm 보다 커야 한다)
 LEARN_K_MIN, LEARN_K_MAX = 0.15, 4.0  # 배운 K 의 특이값 허용 범위
 LEARN_K_COND = 4.0                    # 두 축 배율이 이 이상 차이나면 측정이 깨진 것으로 보고 거부
-# ★9/11 사용자 지시("점 추가 없이"): 두 캠 불일치를 버리지 말고 **기울기(roll)와 밑동 오차로 푼다**.
-#   높이가 다른 두 점(윗면 80mm / 옆면 h)을 보는 두 캠의 측정값 d_top, d_side 는
-#     d_top  = d_밑동 + H_top·θ,  d_side = d_밑동 + H_side·θ  → 두 미지수, 두 식.
-#   d_밑동 = (H_top·d_side − H_side·d_top)/(H_top − H_side).  외벽 높이 80 은 STL 실측(9/11).
-#   (색, 카메라) 별 점 높이가 **둘 다 채워진 색에서만** 작동. None 이면 종전 그대로(불일치 → 정지).
-DOT_HEIGHT_MM = {
-    ("red_s", "wrist"): 80.0, ("red_s", "newcam"): None,     # 옆면 점 높이는 자로 재서 채운다(오늘 역산 ≈24)
-    ("yellow", "wrist"): 80.0, ("yellow", "newcam"): None,
-}
-ROLL_MAX_DEG = 3.0        # 푼 기울기가 이보다 크면 모델 밖 — 정지
 SANE_MAX_MM = 25.0   # ★9/11: 한 번의 정렬 계산이 이 크기를 넘으면 오매칭으로 보고 거부(실기 53mm 명령 사고)
 COMBINE_TOL_MM, COMBINE_TOL_DEG = 1.5, 0.6
 FAR_STEP_MM = 4.0   # ★9/11: 두 캠이 같은 방향으로 이만큼 넘게 멀면 불일치 판정을 보류하고 다가간다
@@ -1042,16 +1032,6 @@ def check(color, srcs=None, roles=None):
             A, B_ = per[xy_keys[i]], per[xy_keys[j]]
             dd = math.dist(A["dmm"], B_["dmm"])
             if dd > COMBINE_TOL_MM:
-                # ★9/11 ①: 점 높이가 둘 다 등록된 색이면 불일치를 기울기+밑동 오차로 푼다(점 추가·기준 재촬영 없음)
-                rs = solve_roll(color, per, [xy_keys[i], xy_keys[j]])
-                if rs is not None:
-                    if rs["roll_deg"] > ROLL_MAX_DEG:
-                        return None, per, (f"두 캠 불일치 {dd:.2f}mm 를 기울기로 풀면 {rs['roll_deg']:.1f}° > {ROLL_MAX_DEG}° "
-                                           f"— 기울기 모델 밖(점 오인/파지 이상), 정지")
-                    print(f"  ⚠ 두 캠 불일치 {dd:.2f}mm → 기울기 {rs['roll_deg']:.2f}° 로 풀어 밑동 오차 "
-                          f"({rs['d_true'][0]:+.2f},{rs['d_true'][1]:+.2f})mm 로 간다 (윗면 {rs['H'][0]:.0f}/옆면 {rs['H'][1]:.0f}mm)", flush=True)
-                    C = {"dmm": rs["d_true"], "drz": 0.0, "n_src": 2, "rz_from": "고정(기울기 보정)", "roll_deg": rs["roll_deg"]}
-                    return C, per, None
                 # ★9/11 사용자 지시("기준 화면을 찾아가라"): 매핑 오차는 기준 자리에서 멀수록 커진다
                 #   (9/10 실측: 3.4mm 밖 불일치 1.5~1.9 / 기준 자리 0.099). 멀리서 판정하면 항상 걸린다.
                 #   두 캠이 '같은 방향·크기 2배 이내' 이고 둘 다 FAR_STEP_MM 넘게 멀면 = 점 오인이 아니라 거리 탓
@@ -1094,22 +1074,6 @@ def fmt(D):
     return (f"[{D['src']}{' 점1개' if D.get('one_dot') else ''}] Δpx ({D['dpx'][0]:+.1f},{D['dpx'][1]:+.1f}) 각 {D['dang_img']:+.2f}° → "
             f"XY ({D['dmm'][0]:+.2f},{D['dmm'][1]:+.2f})mm rz {D['drz']:+.2f}° "
             f"(특징 {len(D['matched'])} s={D['sim']['s']:.3f} θ={D['sim']['theta']:+.2f}° rms {D['sim']['rms']:.1f}px {D['scale_mm_px']:.3f}mm/px)")
-
-
-def solve_roll(color, per, xy_keys):
-    """두 xy 카메라의 dmm 과 점 높이로 (밑동 오차 벡터, 기울기°) 를 푼다. 못 풀면 None."""
-    if len(xy_keys) != 2:
-        return None
-    a, b = xy_keys
-    Ha, Hb = DOT_HEIGHT_MM.get((color, a)), DOT_HEIGHT_MM.get((color, b))
-    if Ha is None or Hb is None or abs(Ha - Hb) < 20.0:
-        return None
-    da, db = np.array(per[a]["dmm"], float), np.array(per[b]["dmm"], float)
-    d_true = (Ha * db - Hb * da) / (Ha - Hb)
-    theta = (da - db) / (Ha - Hb)                    # mm/mm 벡터 → 각 축 기울기(rad)
-    deg = float(np.degrees(np.hypot(*theta)))
-    return {"d_true": (float(d_true[0]), float(d_true[1])), "roll_deg": deg,
-            "top": a if Ha > Hb else b, "H": (Ha, Hb)}
 
 
 def _learn_move_K(color, srcs, roles, e0, tol_deg):
