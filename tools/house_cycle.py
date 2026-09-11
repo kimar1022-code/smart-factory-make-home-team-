@@ -262,6 +262,13 @@ def set_stage(stage, wait=None, **kw):
     with LOCK:
         S["stage"] = stage; S["wait"] = wait; S.update(kw)
     log(f"── {stage}" + (f" (대기: {wait})" if wait else ""))
+    try:                                                     # ★9/12 기준점 오버레이용 단계 기록(표시 전용)
+        import refpts_overlay as _RO
+        _RO.set_stage(stage, S.get("color"))
+        if str(stage).startswith("1 BASE"):
+            _RO.clear()                                      # 새 사이클 — 지난 매칭점 지움
+    except Exception:
+        pass
 
 
 def jload(path, default=None):
@@ -721,6 +728,15 @@ def stage_rack(color, teach_rack=False):
         rz = HG.wrap_deg(180.0 + dang)
     rot = [180.0, 0.0, rz]
     R = {"mid": e["mid"], "len_px": e["len_px"], "ang": e["ang"], "dang": dang, "n_dots": e["n_dots"], "grip_xy": (gx, gy), "offset": off, "made": time.strftime("%H:%M:%S")}
+    try:                                                     # ★9/12 랙 단계 기준점(손목캠): 기준 파지중심 Pc0 ↔ 지금 양끝·중점
+        import refpts_overlay as _RO
+        _RO.publish_pts(color, "wrist", "2 RACK",
+                        ref=[["Pc0 grip", "green", rr["Pc0"][0], rr["Pc0"][1]]],
+                        now=[["p1", "yellow", e["p1"][0], e["p1"][1]], ["p2", "yellow", e["p2"][0], e["p2"][1]],
+                             ["mid", "white", e["mid"][0], e["mid"][1]]],
+                        note=f"len {e['len_px']:.0f}/{L0:.0f}px  ang {dang:+.2f}deg  dots {e.get('n_dots','?')}")
+    except Exception:
+        pass
     with LOCK: S["rack"] = R
     _gm = {"mid_dot": "가운데 점", "ends_mid": "끝점 중점(가운데 점 미검출)"}.get(e.get("grip_mode", "ends_mid"), "?")
     log(f"  랙: 파지기준={_gm} ({e['mid'][0]:.0f},{e['mid'][1]:.0f}) 점 {e.get('n_dots','?')}개 길이 {e['len_px']:.0f}px 각 {e['ang']:+.2f}°(Δ{dang:+.2f}) → 파지 XY ({gx:.2f},{gy:.2f}) 보정 along {off['along']:+.2f} across {off['across']:+.2f}")

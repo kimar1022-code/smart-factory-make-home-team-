@@ -35,6 +35,10 @@ import cv2
 sys.path.insert(0, "/home/ar/bf2_console/tools")
 import pillar_dots as PD
 import house_geometry as HG
+try:
+    import refpts_overlay as _RO      # ★9/12 기준점 오버레이(표시 전용, 없어도 정렬은 돈다)
+except Exception:
+    _RO = None
 
 BR = "http://127.0.0.1:8765"
 MAP = "/home/ar/bf2_console/cam2robot_observe.json"
@@ -928,6 +932,24 @@ def available_sources(color):
     return out
 
 
+def _pub(color, src, ref, meas, z, rz, tcp, D=None, why=None):
+    """★9/12 표시용 내보내기. 정렬 계산과 완전히 분리 — 어떤 예외도 삼킨다."""
+    if _RO is None:
+        return
+    try:
+        single = len(ref.get("pillars") or []) == 1
+        try:
+            sx, sy = _pred_shift_px(ref, z, rz, src, tcp) if tcp else (0.0, 0.0)
+        except Exception:
+            sx, sy = 0.0, 0.0
+        search = {"shift": [float(sx), float(sy)], "r": float(SINGLE_SEARCH_PX if single else DET[src]["search"])}
+        _RO.publish(color, src, ref, meas,
+                    delta=[float(D["dmm"][0]), float(D["dmm"][1])] if D else None,
+                    tcp=[round(float(v), 2) for v in tcp[:3]] if tcp else None, search=search, note=why)
+    except Exception:
+        pass
+
+
 def check(color, srcs=None, roles=None):
     """가용 카메라 전부 Δ. 반환 (combined, per_src, why). combined=None 이면 하강 금지.
     roles: {src: "xy"|"rz"|"both"|"measure"} — 결합에 쓰는 역할(measure=측정·승격만, 결합 제외). 없으면 전부 both."""
@@ -941,6 +963,7 @@ def check(color, srcs=None, roles=None):
     per, last = {}, {}
     for src in srcs:
         ref = load_ref(color, src)
+        _pub(color, src, ref, None, z, rz, t)                 # 기준점 먼저(측정 실패해도 기준은 보이게)
         if abs(z - ref["z"]) > 3.0:
             return None, per, f"[{src}] 높이 z{z:.0f} ≠ 기준 z{ref['z']:.0f}"
         if src == "wrist" and ref.get("expo") and not check.expo_done:
@@ -1016,11 +1039,13 @@ def check(color, srcs=None, roles=None):
                 if meas:
                     D, why = delta(ref, meas, z, rz, src, tcp_now=t)
         if D is None:
+            _pub(color, src, ref, meas, z, rz, t, None, why)   # 실패해도 어디까지 잡았는지 보이게
             _b = _bail(why)
             if _b is None: continue
             return None, per, _b[1]
         per[src] = D
         last[src] = {"wall": meas["wall"], "pillars": meas["pillars"], "tcp": t, "z": z}
+        _pub(color, src, ref, meas, z, rz, t, D)              # 매칭점 + Δ
     promote_ref.last[color] = last
     # 결합: XY 평균(불일치 게이트), rz 는 점 2개 카메라 우선 — roles 가 있으면 역할별로
     xy_keys = [k for k in per if roles.get(k, "both") in ("xy", "both")]
