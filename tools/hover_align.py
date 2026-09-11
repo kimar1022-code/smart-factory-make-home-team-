@@ -70,6 +70,10 @@ SCALE_TOL, RMS_TOL_PX = 0.03, 6.0
 MAX_STEP_MM, MAX_STEP_DEG = 3.0, 0.5
 TOL_MM, TOL_DEG = 0.3, 0.15
 EXPECT_TCP = None   # ★9/11: 이번 사이클의 계산 목표 [x,y] — 예측 이동 매칭의 기준점(house_cycle 이 정렬 전에 세팅)
+LEARN_MOVE = {"blue_in", "yellow_in", "red_in"}   # ★9/11 사용자 지시: 내벽은 자를 믿지 말고 '실제 이동'으로 배운다
+LEARN_STEP_MM = 1.5      # 시험 이동 크기(최소 실행 이동 0.8mm 보다 커야 한다)
+LEARN_K_MIN, LEARN_K_MAX = 0.15, 4.0  # 배운 K 의 특이값 허용 범위
+LEARN_K_COND = 4.0                    # 두 축 배율이 이 이상 차이나면 측정이 깨진 것으로 보고 거부
 SANE_MAX_MM = 25.0   # ★9/11: 한 번의 정렬 계산이 이 크기를 넘으면 오매칭으로 보고 거부(실기 53mm 명령 사고)
 COMBINE_TOL_MM, COMBINE_TOL_DEG = 1.5, 0.6
 FAR_STEP_MM = 4.0   # ★9/11: 두 캠이 같은 방향으로 이만큼 넘게 멀면 불일치 판정을 보류하고 다가간다
@@ -1050,12 +1054,47 @@ def fmt(D):
             f"(특징 {len(D['matched'])} s={D['sim']['s']:.3f} θ={D['sim']['theta']:+.2f}° rms {D['sim']['rms']:.1f}px {D['scale_mm_px']:.3f}mm/px)")
 
 
+def _learn_move_K(color, srcs, roles, e0, tol_deg):
+    """★시험 이동 2번으로 '명령 mm → 실제로 줄어든 mm' 행렬 K 를 그 자리에서 배운다.
+    K = I 면 저장된 자가 맞는 것. 자가 틀렸거나(평면 차이) 벽이 죠 안에서 미끄러지면 K 가 작아진다.
+    반환 (K, 마지막 측정 e). 못 배우면 (None, 마지막 e) — 호출부는 종전 경로로 간다."""
+    cols, e_prev = [], np.array(e0, float)
+    for k, ax in enumerate(("x", "y")):
+        # ★시험 이동은 **오차가 줄어드는 쪽**으로 찌른다(반대로 찌르면 오차를 키워 뒤에서 상한에 걸린다)
+        h = LEARN_STEP_MM * (1.0 if float(e_prev[k]) >= 0 else -1.0)
+        d = [0.0, 0.0]; d[k] = h
+        move_rel(d[0], d[1], 0.0); time.sleep(0.6)
+        C, per, why = check(color, srcs, roles)
+        if C is None:
+            print(f"  (시험 이동 {ax}: 측정 실패 — K 학습 포기, 종전 방식)", flush=True)
+            return None, e_prev
+        e_now = np.array(C["dmm"], float)
+        col = (e_prev - e_now) / h          # 1mm 명령했을 때 실제로 줄어든 mm
+        print(f"  시험 이동 {ax} {h:+.1f}mm → 오차 ({e_prev[0]:+.2f},{e_prev[1]:+.2f}) → ({e_now[0]:+.2f},{e_now[1]:+.2f}) ⇒ K 열 ({col[0]:+.2f},{col[1]:+.2f})", flush=True)
+        cols.append(col); e_prev = e_now
+    K = np.array(cols).T
+    try:
+        sv = np.linalg.svd(K, compute_uv=False)
+    except Exception:
+        return None, e_prev
+    cond = float(sv.max() / max(sv.min(), 1e-9))
+    if not (LEARN_K_MIN <= float(sv.min()) and float(sv.max()) <= LEARN_K_MAX) or cond > LEARN_K_COND:
+        print(f"  ⚠ 배운 K 특이값 {np.round(sv,2).tolist()} (비 {cond:.1f}) 이 허용 {LEARN_K_MIN}~{LEARN_K_MAX}·비 {LEARN_K_COND} 밖 "
+              f"— 측정이 깨진 것으로 보고 정지(추측으로 움직이지 않는다)", flush=True)
+        return "BAD", e_prev
+    print(f"  ✅ 배운 K = {np.round(K,3).tolist()} (I 이면 자가 정확). 자 배율 ≈ {1/float(np.sqrt(abs(np.linalg.det(K)))):.2f}", flush=True)
+    return K, e_prev
+
+
 def align(color, dry=False, tol_mm=TOL_MM, tol_deg=TOL_DEG, srcs=None, roles=None):
     """보정 루프. 수렴 True / dry False / 실패 예외(호출자가 정지·보고). srcs 로 카메라 지정, roles 로 역할(xy/rz/both/measure)."""
     prev = None
     check.expo_done = False
     check.area_expo_done = False
     rz_fixed = False
+    K = None
+    learn_tried = False
+    learn = color in LEARN_MOVE
     for it in range(MAX_ITER):
         C, per, why = check(color, srcs, roles)
         for D in per.values():
@@ -1086,14 +1125,42 @@ def align(color, dry=False, tol_mm=TOL_MM, tol_deg=TOL_DEG, srcs=None, roles=Non
         #   로봇의 최소 실행 이동량(≈0.8mm)보다 작은 명령은 제대로 실행되지 않아 잔차를 만들고,
         #   그 잔차가 다음 측정을 키워 '발산'으로 보인다. **실행할 수 없는 크기는 명령하지 않는다.**
         #   (게이트 완화가 아니다 — 정렬 결과는 그대로 정렬 온전성 게이트가 다시 검사한다.)
-        if e_mm < MIN_EXEC_MM and e_deg <= tol_deg:
+        if K is None and e_mm < MIN_EXEC_MM and e_deg <= tol_deg:
             print(f"  ✅ 호버 정렬 한계 수렴 ({e_mm:.2f}mm < 최소 실행 이동 {MIN_EXEC_MM}mm — 더 줄일 수 없음)")
             return True
         # 15:44 실기: 18.6→14.2mm 로 줄고 있는데 rz 0.05→0.17°(손목캠 잡음) 로 '발산' 오판 → 각은 0.3° 이하 변동은 무시
         if prev is not None and (e_mm > prev[0] * 1.2 + 0.2 or (e_deg > 0.3 and e_deg > prev[1] * 1.2 + 0.1)):
             raise RuntimeError(f"호버 정렬 발산({prev[0]:.2f}→{e_mm:.2f}mm, {prev[1]:.2f}→{e_deg:.2f}°) — 부호/매핑 의심, 정지")
         prev = (e_mm, e_deg)
-        dx, dy = (max(-MAX_STEP_MM, min(MAX_STEP_MM, v)) for v in C["dmm"])
+        # ★9/11 사용자 지시("자 말고 이동으로 고치자"): 내벽은 시험 이동 2번으로 **명령 mm → 실제 줄어든 mm**(K)를 그 자리에서 배운다.
+        #   K=I 면 자가 맞는 것. 9/11 실측에서는 자가 1.49배 작아 K≈0.67·I 였고, 파지 미끄러짐도 K 에 함께 들어온다.
+        #   배운 K 가 이상하면(특이값 범위 밖) 쓰지 않고 종전 경로 그대로 — 새 정지 조건을 만들지 않는다.
+        if learn and K is None and not learn_tried and not dry:
+            learn_tried = True
+            K, e_new = _learn_move_K(color, srcs, roles, np.array(C["dmm"], float), tol_deg)
+            if isinstance(K, str):      # "BAD" — 배운 매핑이 깨졌다
+                K = None
+                raise RuntimeError("내벽 정렬: 시험 이동으로 잰 매핑이 깨졌다(점 검출 불안정/파지 미끄러짐 의심) — 재파지 권함")
+            if e_new is not None:
+                C = dict(C); C["dmm"] = (float(e_new[0]), float(e_new[1]))
+                e_mm = math.hypot(*C["dmm"]); prev = (e_mm, e_deg)
+                if e_mm <= tol_mm and e_deg <= tol_deg:
+                    print(f"  ✅ 호버 정렬 수렴 ({e_mm:.2f}mm, {e_deg:.2f}°) — 시험 이동 중 도달"); return True
+        want = np.array(C["dmm"], float)
+        if K is not None:
+            try:
+                want = np.linalg.solve(K, want)
+                print(f"    (배운 K 적용: 계산 {C['dmm'][0]:+.2f},{C['dmm'][1]:+.2f} → 명령 {want[0]:+.2f},{want[1]:+.2f}mm)", flush=True)
+            except Exception:
+                want = np.array(C["dmm"], float)
+        # ★배운 K 가 있으면 '실행 가능한가' 는 계산값이 아니라 **명령값**으로 판단해야 한다.
+        #   (자가 1.49배 작으면 계산 0.54mm 가 실제로는 명령 1.0mm — 충분히 실행된다)
+        if K is not None and float(np.hypot(*want)) < MIN_EXEC_MM and e_deg <= tol_deg:
+            print(f"  ✅ 호버 정렬 한계 수렴 (명령 {float(np.hypot(*want)):.2f}mm < 최소 실행 이동 {MIN_EXEC_MM}mm — 더 줄일 수 없음)")
+            return True
+        if float(np.hypot(*want)) > SANE_MAX_MM:
+            raise RuntimeError(f"호버 정렬 명령 {float(np.hypot(*want)):.1f}mm > {SANE_MAX_MM}mm — 매핑/오매칭 의심, 정지")
+        dx, dy = (max(-MAX_STEP_MM, min(MAX_STEP_MM, float(v))) for v in want)
         drz = max(-MAX_STEP_DEG, min(MAX_STEP_DEG, C["drz"])) if e_deg > tol_deg else 0.0
         if dry:
             print(f"    (dry) 이동 ({dx:+.2f},{dy:+.2f}) rz {drz:+.2f}"); return False
