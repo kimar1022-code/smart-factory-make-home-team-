@@ -247,7 +247,7 @@ textarea{width:100%;min-height:220px;font:18px var(--mono);border:1px solid #3A4
     <div id="twinlabel">DIGITAL TWIN · drag=move · right-drag/wheel=rotate · empty=camera</div>
     <div style="position:absolute;top:8px;right:10px;z-index:5;display:flex;gap:8px">
       <button id="tg-joint" title="켜면 로봇 링크를 잡아끌어 관절을 움직입니다(고스트 미리보기 → 놓으면 실제 이동). 배치 이동은 꺼짐">🖐 관절 드래그</button>
-      <button id="tg-zk1"></button><button id="tg-zk2"></button><button id="tg-conv"></button><button id="tg-cam"></button><button id="tg-scam"></button><button id="tg-rvw"></button><button id="tg-ncam"></button></div>
+      <button id="tg-zk1"></button><button id="tg-zk2"></button><button id="tg-conv"></button><button id="tg-cam"></button><button id="tg-scam"></button><button id="tg-rvw"></button><button id="tg-ncam"></button><button id="tg-gcam"></button></div>
     <div id="twinstate"></div>
     <div id="camwrap" class="campanel" title="손목캠(D435 :8766) — 클릭=그 점 추적 고정 · 더블클릭=해제">
       <div class="chdr"><span id="camhdr-t">손목캠 </span><span><button class="c-pop" title="별창으로">⧉</button><button class="c-x" title="빼기">✕</button></span></div>
@@ -264,6 +264,10 @@ textarea{width:100%;min-height:220px;font:18px var(--mono);border:1px solid #3A4
     <div id="ncamwrap" class="campanel" title="새 카메라(USB /dev/video0 → :8768) — ⟳ = 90° 회전">
       <div class="chdr"><span id="ncamhdr-t">새카메라 </span><span><button class="c-rot" title="90° 회전">⟳</button><button class="c-pop" title="별창으로">⧉</button><button class="c-x" title="빼기">✕</button></span></div>
       <img id="ncam" alt="new usb cam"><div class="cgrip" title="드래그해서 크기 조절"></div>
+    </div>
+    <div id="gcamwrap" class="campanel" title="글로벌캠(비전 PC 192.168.20.30 → UDP 21031 → :8779) — 셀 전체 탑뷰 1280x960 10fps">
+      <div class="chdr"><span id="gcamhdr-t">글로벌캠 </span><span><button class="c-pop" title="별창으로">⧉</button><button class="c-x" title="빼기">✕</button></span></div>
+      <img id="gcam" alt="global cam"><div class="cgrip" title="드래그해서 크기 조절"></div>
     </div>
   </div>
   <div class="panel">
@@ -1278,6 +1282,14 @@ function camPanel(id,btnId,label,streamUrl,def){
    if(nBoot!==null&&j.boot!==nBoot){nc.connect();log('sys','ncam','새카메라 서버 재시작 감지 → 재접속')}
    nBoot=j.boot;$('ncamhdr-t').textContent='새카메라 '+j.rot+'° ';
    if(j.age!=null&&j.age>5)nc.connect()}catch(e){if(++nFail===3){nc.connect()}}},3000);
+ /* 9/11 글로벌캠 — 비전 PC 가 HMV1/UDP 로 쏘는 셀 탑뷰를 global_udp_cam.py(:8779)가 MJPEG 로 중계. 콘솔은 640 축소본(무선 부하) */
+ const GCAM=`http://${H}:8779`;
+ const gc=camPanel('gcamwrap','tg-gcam','글로벌캠',GCAM+'/stream?w=640',{x:Math.max(0,R.width-430),y:10,w:420,on:true});
+ let gBoot=null,gFail=0;
+ setInterval(async()=>{if(!gc.st.on)return;try{const j=await(await fetch(GCAM+'/health',{cache:'no-store'})).json();gFail=0;
+   if(gBoot!==null&&j.boot!==gBoot){gc.connect();log('sys','gcam','글로벌캠 중계 재시작 감지 → 재접속')}
+   gBoot=j.boot;$('gcamhdr-t').textContent=`글로벌캠 ${j.fps}fps${j.dropped?' 손실'+j.dropped:''} `;
+   if(j.age!=null&&j.age>5)gc.connect()}catch(e){if(++gFail===3){gc.connect()}}},3000);
  const im=wc.im;
  /* 워치독: cam_server 재시작(boot 변경)·응답 없음이면 재접속 — MJPEG 는 끊겨도 onerror 가 안 뜬다 */
  let camBoot=null,camFail=0;
