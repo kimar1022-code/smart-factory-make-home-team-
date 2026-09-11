@@ -154,7 +154,12 @@ MIN_EXEC_MM = 0.8                               # 로봇이 실제로 실행하�
 ALIGN_MAX_AGE_S = 15 * 60                       # ②정렬 완료 후 이 시간이 지나면 하강 거부(베이스가 움직였을 수 있음 → 재정렬)
 SLOT_HISTORY_MAX = 5                            # ③슬롯 기준 승격 시 보존하는 이전 값 개수
 # ★9/10: A타입 6벽 연속 — 외벽 4 → 내벽 2(파랑 먼저). 외벽→내벽 순서는 필수(내벽이 밑판 깊이 검출을 가름).
-RUN4_ORDER = ("blue", "yellow", "red", "red_s", "blue_in", "yellow_in")
+# ★9/11: 집 타입마다 벽 구성이 다르다. A = 외벽4+내벽2(파랑/노랑), B = 외벽4+내벽1(red_in).
+_RUN_ORDER_A = ("blue", "yellow", "red", "red_s", "blue_in", "yellow_in")
+_RUN_ORDER_B = ("blue", "yellow", "red", "red_s", "red_in")
+def run_order():
+    return _RUN_ORDER_B if house_type() == "b" else _RUN_ORDER_A
+RUN4_ORDER = _RUN_ORDER_A   # 하위호환(직접 참조하는 옛 코드용) — 실제 사용은 run_order()
 # 13:53 실기 2회: 손목캠↔새카메라 불일치 2.1mm 반복. 사용자 육안 자리와 비교하면 새카메라가 두 번 다 가까웠음(rz 특히).
 #   손목캠은 든 벽 윗점이 프레임 가장자리(x≈1025)라 원근·죠 안 기울기에 민감 → 파랑은 새카메라 단독 정렬(손목캠은 참고 출력).
 ALIGN_SRCS = {"blue": ("newcam",)}                # 색별 정렬 카메라(없으면 가용 전부)
@@ -200,12 +205,11 @@ ALIGN_ROLES = _RolesByHouse()
 
 # 파지 편차 게이트도 타입별 — A는 사용자 지시로 비차단, B는 검증된 예전 동작(정지) 유지
 def apply_speed_profile():
-    """★9/11 사용자 지시: A타입은 저속 2%·외벽 채널 15%·SAFE 이동 35%. B타입은 9/1 동결값(1/10/30).
-    하강(descend_monitored) 직전과 이동 전에 호출해 place_calc 의 조절 변수를 집 타입에 맞춘다."""
-    a = house_type() == "a"
-    PC.SPD_SLOW = 2 if a else 1
-    PC.SPD_CHANNEL_OUTER = 15 if a else 10
-    return 35 if a else PC.SPD_MOVE
+    """★9/11: A·B 속도 통일(사용자 지시). 저속 2%·외벽 채널 15%·SAFE 이동 35%.
+    (9/11 오전엔 A만 올리고 B 동결이었으나, A 검증 후 B도 같게 통일)"""
+    PC.SPD_SLOW = 2
+    PC.SPD_CHANNEL_OUTER = 15
+    return 35
 
 
 def spd_move():
@@ -1301,7 +1305,8 @@ def align_here(color):
     set_stage("WAIT DESCEND", wait="[⬇ 하강] 버튼 (x·y·yaw 확인 후)", color=color)
 
 
-def run_multi(order=RUN4_ORDER):
+def run_multi(order=None):
+    order = order or run_order()
     """④4벽 연속. 벽마다 run_cycle(빈손 베이스 재측정 포함) → [⬇ 하강] 버튼 대기 → stage_descend.
     어느 벽이든 Gate/Abort/예외/안착 미확인이면 그 자리에서 전체 중단(다음 벽 진행 없음)."""
     order = [c for c in order if c in COLORS]
@@ -1532,7 +1537,7 @@ def worker():
             elif op == "goto_obs": set_stage("GOTO OBS"); goto_obs(); set_stage("IDLE")
             elif op == "slot2": set_stage("TEACH SLOT 2/2"); teach_slot_base(arg["color"]); set_stage("IDLE")
             elif op == "slot_both": teach_slot_both(arg["color"]); set_stage("IDLE")
-            elif op == "run4": run_multi(arg.get("order") or RUN4_ORDER)
+            elif op == "run4": run_multi(arg.get("order") or run_order())
             elif op == "probe": set_stage(f"PROBE {arg['src']}"); probe_cam(arg["src"], arg["color"]); set_stage("IDLE")
             elif op == "lift": stage_lift()
         except Abort:
@@ -1571,7 +1576,7 @@ def handle_cmd(q):
     if op in ("start", "descend", "goto_obs", "slot2", "probe", "run4", "slot_both", "resume_held", "descend_reteach", "align_here", "to_target", "lift"):
         if S["busy"]:
             return {"ok": False, "err": "실행 중 — 먼저 중단"}
-        order = [c for c in (q.get("order", [""])[0] or "").split(",") if c] or list(RUN4_ORDER)
+        order = [c for c in (q.get("order", [""])[0] or "").split(",") if c] or list(run_order())
         if op == "run4" and any(c not in COLORS for c in order):
             return {"ok": False, "err": f"run4 순서 {order}?"}
         Q.put((op, {"color": color, "src": src, "order": order, "teach_rack": q.get("teach", ["0"])[0] == "1"})); return {"ok": True}
@@ -1724,6 +1729,6 @@ if __name__ == "__main__":
     seed_state()
     threading.Thread(target=worker, daemon=True).start()
     if "--auto" in sys.argv:                                        # ④서버 기동과 함께 run4 를 대기열에(하강은 버튼)
-        Q.put(("run4", {"order": list(RUN4_ORDER)})); log("--auto: run4 대기열 등록 (벽마다 하강은 [⬇ 하강] 버튼)")
+        Q.put(("run4", {"order": list(run_order())})); log("--auto: run4 대기열 등록 (벽마다 하강은 [⬇ 하강] 버튼)")
     log(f"house_cycle :{PORT}  ★집타입 {house_type().upper()}  기준={os.path.realpath(STATE)}")
     ThreadingHTTPServer(("0.0.0.0", PORT), H).serve_forever()
