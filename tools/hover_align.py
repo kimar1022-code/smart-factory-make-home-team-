@@ -70,7 +70,7 @@ SCALE_TOL, RMS_TOL_PX = 0.03, 6.0
 MAX_STEP_MM, MAX_STEP_DEG = 3.0, 0.5
 TOL_MM, TOL_DEG = 0.3, 0.15
 EXPECT_TCP = None   # ★9/11: 이번 사이클의 계산 목표 [x,y] — 예측 이동 매칭의 기준점(house_cycle 이 정렬 전에 세팅)
-LEARN_MOVE = {"blue_in", "yellow_in", "red_in"}   # ★9/11 사용자 지시: 내벽은 자를 믿지 말고 '실제 이동'으로 배운다
+LEARN_MOVE = {"blue_in", "yellow_in", "red_in"}   # 내벽 3색 — 자를 믿지 말고 실제 이동으로 배운다
 LEARN_STEP_MM = 1.5      # 시험 이동 크기(최소 실행 이동 0.8mm 보다 커야 한다)
 LEARN_K_MIN, LEARN_K_MAX = 0.15, 4.0  # 배운 K 의 특이값 허용 범위
 LEARN_K_COND = 4.0                    # 두 축 배율이 이 이상 차이나면 측정이 깨진 것으로 보고 거부
@@ -147,7 +147,11 @@ WALL_COLOR_BY_SRC = {("red_s", "newcam"): "yellow",
 #   → 든 벽을 기둥에 맞추는 대신 **로봇을 밑판에 맞춘다**: 밑판 특징이 기준 사진의 자리로 돌아오도록 로봇을 움직인다.
 #   벽은 제대로 물렸다고 믿는다(파지 확인 수단이 없음 — 사용자 지시).
 #   이득: 관측자세(z650)에서 잰 베이스(rms 1.2~2.2mm) 대신 **꽂을 자리 바로 위에서 그 자리를 직접** 본다(점 산포 0.02mm).
-BASE_ONLY_ALIGN = {"yellow_in", "blue_in"}   # ★9/11 사용자 재확인 (a): 내벽 기준은 **밑판 노란 점**이다
+BASE_ONLY_ALIGN = {"yellow_in", "blue_in"}
+#   ★9/11 20:02 실증: blue_in 은 밑판 노란 3점만 볼 때 삽입 성공(242.09,-376.29).
+#   든 벽 파란 점(9/10 저장)까지 보면 오늘 파지와 4mm 어긋나 반대로 끌려간다(19:40 오삽입, 19:52 게이트).
+#   사용자 9/10 원지시 그대로: "blue_in = 밑판 노랑 3점 / yellow_in = 밑판 노랑 2점".
+#   🔴벽 점을 다시 쓰려면 **오늘 성공한 자리에서 기준을 새로 찍은 뒤**에만(낡은 벽 점은 독).
 #   (9/10 원지시 "블루_in : 밑판 노랑점 3개 / 옐로_in : 밑판 노랑점 2개").
 #   blue_in 은 든 벽 파란 점 2개까지 기준에 들어가 있었는데, 그 중 하나가 안 보이면 회전을 못 봐서
 #   4~5mm 를 엉뚱하게 당겼다(9/11 19:33·19:40·19:52 연속 실패). 밑판 기준 모드로 통일.
@@ -606,11 +610,26 @@ def _pred_shift_px(ref, z_tcp, rz_tcp, src, tcp_now):
     if float(np.hypot(*d_mm)) < 0.3:                       # 같은 자리 — 굳이 밀지 않는다
         return (0.0, 0.0)
     try:
-        J = np.linalg.inv(jinv_for(src, z_tcp, rz_tcp)[0] * plane_scale(ref))
+        J = np.linalg.inv(jinv_ref(ref, src, z_tcp, rz_tcp)[0])
     except Exception:
         return (0.0, 0.0)
     v = J @ d_mm
     return (float(v[0]), float(v[1]))
+
+
+def jinv_ref(ref, src, z_tcp, rz_tcp):
+    """★9/11: 기준에 실측 매핑(Jinv_override)이 있으면 그것을 쓴다. 없으면 종전 jinv_for × plane_scale.
+    red_s 새카메라 실측(z440, rz+91.2, ±2mm 양방향): J = [[-0.083,4.842],[4.889,0.070]] px/mm 로 거의 등방인데,
+    저장된 매핑은 [[0,4.954],[5.641,0.057]] 로 한 축이 14% 커서 방향에 따라 손목캠과 1.8mm 어긋났다.
+    ⚠rz 가 다르면 손목캠 매핑은 회전하므로 override 는 **그 색이 늘 쓰는 rz** 에서 잰 것만 저장한다."""
+    ovr = ref.get("Jinv_override")
+    if ovr:
+        try:
+            return np.array(ovr, float), ROT_SIGN.get(src, -1.0)
+        except Exception:
+            pass
+    J, rs = jinv_for(src, z_tcp, rz_tcp)
+    return J * plane_scale(ref), rs
 
 
 def color_base_only(ref):
@@ -704,7 +723,7 @@ def delta(ref, meas, z_tcp, rz_tcp, src="wrist", tcp_now=None):
         # ★밑판 기준: 밑판 특징이 기준 자리에서 (tx,ty) 만큼 옮겨 보이면, 로봇이 밑판에 대해 그만큼 움직인 것이다.
         #   되돌리려면 반대로 간다 → dpx = (-tx, -ty). (9/10 실측 검증: 밑판 점 이동 = +J·Δ로봇)
         dpx = (-float(tx), -float(ty))
-        Jinv, rsign = jinv_for(src, z_tcp, rz_tcp); Jinv = Jinv * plane_scale(ref)
+        Jinv, rsign = jinv_ref(ref, src, z_tcp, rz_tcp)
         dmm = Jinv @ np.array(dpx)
         return {"src": src, "dpx": dpx, "dang_img": -th, "dmm": (float(dmm[0]), float(dmm[1])),
                 "drz": 0.0, "sim": {"s": s, "theta": th, "rms": rms},
@@ -756,7 +775,7 @@ def delta(ref, meas, z_tcp, rz_tcp, src="wrist", tcp_now=None):
         if dang > 90: dang -= 180
         if dang < -90: dang += 180
     dpx = (mid_now[0] - mid_exp[0], mid_now[1] - mid_exp[1])
-    Jinv, rsign = jinv_for(src, z_tcp, rz_tcp); Jinv = Jinv * plane_scale(ref)
+    Jinv, rsign = jinv_ref(ref, src, z_tcp, rz_tcp)
     dmm = Jinv @ np.array(dpx)
     if float(np.hypot(*dmm)) > SANE_MAX_MM:      # ★9/11: 정상 사이클에서 나올 수 없는 크기 — 계산 결과를 믿지 말고 즉시 거부
         return None, (f"[{src}] 정렬 계산 {float(np.hypot(*dmm)):.1f}mm (Δ{dpx[0]:+.0f},{dpx[1]:+.0f}px) > {SANE_MAX_MM}mm "
