@@ -173,10 +173,10 @@ ALIGN_MAX_MOVE_MM = 4.0    # ★9/7: 정렬이 슬롯 기준에서 이만큼 넘
 #   둘 다 xy 면 COMBINE_TOL_MM(1.5mm) 불일치 게이트가 걸린다 — red_s 에서 실제로 잘못된 이동을 막았다.
 # ★9/10: 집 타입마다 카메라 사정이 다르다(밑판 자리·기둥 가림). 오늘 A타입에 맞춰 바꾼 값을
 #   B타입에 그대로 물리면 검증 안 된 설정으로 도는 셈이라 타입별로 나눈다.
-_ROLES_A = {"blue":   {"newcam": "xy", "wrist": "xy"},     # 9/10 저녁: 각 캠 기둥 1점 지정 후 두 캠 조종(검증 0.030mm)
-            "yellow": {"wrist": "xy", "newcam": "measure"},# 벽 옆면 빨간 점 = 파지 이상 감지기
+_ROLES_A = {   # ★9/11 사용자 지시: A 도 B 처럼 yellow·red_s 두 캠 xy(옆면 점 위험은 두 캠 불일치 1.5mm 게이트가 담당 — 손목 단독은 오늘 1.3mm 오정렬을 못 잡았다)"blue":   {"newcam": "xy", "wrist": "xy"},     # 9/10 저녁: 각 캠 기둥 1점 지정 후 두 캠 조종(검증 0.030mm)
+            "yellow": {"wrist": "xy", "newcam": "xy"},# 벽 옆면 빨간 점 = 파지 이상 감지기
             "red":    {"wrist": "xy", "newcam": "xy"},     # 9/10 저녁: 두 캠 조종(검증 0.043mm)
-            "red_s":  {"wrist": "xy", "newcam": "measure"},# 옆면 노란 점은 높이↔가로 혼동이 있어 조종 금지
+            "red_s":  {"wrist": "xy", "newcam": "xy"},# 옆면 노란 점은 높이↔가로 혼동이 있어 조종 금지
             "red_in": {"wrist": "xy"},
             "blue_in": {"wrist": "xy"},                    # 새카메라 안 씀(사용자). 밑판 노랑 3점 + 든 벽 2점
             "yellow_in": {"wrist": "xy"}}                  # 밑판 기준 모드(든 벽 점 없음)
