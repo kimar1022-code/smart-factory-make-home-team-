@@ -647,7 +647,7 @@ def stage_rack(color, teach_rack=False):
     if rr.get("expo"):
         try:
             if abs(float(HA.current_expo() or 0) - float(rr["expo"])) > 1.0:
-                HA.set_expo(float(rr["expo"])); time.sleep(0.6)
+                HA.set_expo(float(rr["expo"])); time.sleep(getattr(HA, "EXPO_SETTLE_S", 1.4))   # ★9/12: 0.6s 는 전환 중 프레임(9/10 실증)
             log(f"  (랙 관측 노출 {float(rr['expo']):.0f} 로 맞춤 — 기준 촬영과 같은 노출)")
         except Exception as ex:
             log(f"  (랙 노출 맞춤 실패: {ex})")
@@ -674,7 +674,7 @@ def stage_rack(color, teach_rack=False):
             # 9/7: 랙은 베이스보다 멀고 어두워 관측자세 저노출(42~83)에선 색점이 안 보인다(파랑 0개) → 노출 사다리로 찾는다.
             keep = HA.current_expo()
             for ex in (500, 417, 333, 250, 167, 83, 42):   # 9/7: red_s 는 빨간 점이 작고 어두워 500 이라야 양끝이 안정적으로 붙는다
-                HA.set_expo(ex); time.sleep(0.5)
+                HA.set_expo(ex); time.sleep(getattr(HA, "EXPO_SETTLE_S", 1.4))                  # ★9/12: 사다리도 같은 대기
                 e2, n2, _ = rack_measure(color, L0, x_hint)
                 if e2:
                     log(f"  (랙 관측: 노출 {ex} 로 벽 양끝 확보 — 채택 {n2}회 길이 {e2['len_px']:.0f}px)")
@@ -779,7 +779,7 @@ def grasp_check(color, rack_dang, g_close, gr):
         if _e:
             import hover_align as _HA
             if abs(float(_HA.current_expo() or 0) - float(_e)) > 1.0:
-                _HA.set_expo(float(_e)); time.sleep(0.6)
+                _HA.set_expo(float(_e)); time.sleep(getattr(_HA, "EXPO_SETTLE_S", 1.4))         # ★9/12
                 log(f"  (파지 편차: 서명 촬영 노출 {float(_e):.0f} 로 맞춤)")
         else:
             log("  (파지 편차: 서명에 촬영 노출이 없음 — 값 신뢰도 낮음, 재촬영 권장)")

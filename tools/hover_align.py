@@ -909,10 +909,45 @@ def promote_ref(color, note="삽입 성공 사이클에서 자동 승격"):
     if not last:
         return False
     d = json.load(open(REF)) if os.path.exists(REF) else {}
+    # ★9/12: 승격이 측정값을 통째로 덮어써서 **지정(pillar_pick)·자(plane_scale)·실측 매핑(Jinv_override)·노출을 전부
+    #   날리고 있었다.** (9/11 B red 새카메라가 1점→4점으로 되돌아가고, yellow_in 의 자 1.49 가 사라진 원인.)
+    #   → ①지정된 기둥만 남기고 ②기준에만 있는 설정 키들은 옛 항목에서 이어받는다. 못 지키면 그 카메라는 승격하지 않는다.
+    KEEP = ("plane_scale", "plane_scale_note", "Jinv_override", "Jinv_override_note",
+            "expo", "newcam_bright", "note", "wall_removed_0911")
+    saved = []
     for src, m in last.items():
+        old_e = (d.get(color) or {}).get(src) or {}
+        m = dict(m)
+        pick = pillar_pick(color, src)
+        if pick:
+            keep = []
+            for px, py in pick:
+                cand = [q for q in m.get("pillars", []) if math.hypot(q[1] - px, q[2] - py) <= PICK_TOL_PX]
+                if not cand:
+                    keep = None; break
+                q = min(cand, key=lambda q: math.hypot(q[1] - px, q[2] - py))
+                if q not in keep:
+                    keep.append(q)
+            if keep is None:
+                print(f"  (승격 건너뜀 [{color}/{src}]: 지정 기둥이 측정에 없다 — 옛 기준 유지)"); continue
+            if len(keep) != len(m.get("pillars", [])):
+                print(f"  (승격: 지정 기둥 {len(keep)}개만 유지, {len(m['pillars']) - len(keep)}개 제외)")
+            m["pillars"] = keep
+        elif color not in BASE_ONLY_ALIGN:
+            print(f"  (승격 건너뜀 [{color}/{src}]: 기둥 지정 없음 — 지정 없는 기준을 새로 만들지 않는다)"); continue
+        if color in BASE_ONLY_ALIGN:
+            m["wall"] = []                                   # 밑판 기준 모드는 든 벽 점을 쓰지 않는다
+        elif not m.get("wall"):
+            print(f"  (승격 건너뜀 [{color}/{src}]: 든 벽 점 0개)"); continue
+        for k in KEEP:                                       # 기준에만 있는 설정은 이어받는다
+            if k in old_e and k not in m:
+                m[k] = old_e[k]
         d.setdefault(color, {})[src] = dict(m, made=time.strftime("%Y-%m-%d %H:%M"), note=note)
+        saved.append(src)
+    if not saved:
+        print(f"  (호버 기준 승격 없음 [{color}] — 옛 기준 그대로)"); return False
     json.dump(d, open(REF, "w"), ensure_ascii=False, indent=1)
-    print(f"  ✅ [{color}] 호버 기준 승격({', '.join(last)})"); return True
+    print(f"  ✅ [{color}] 호버 기준 승격({', '.join(saved)})"); return True
 promote_ref.last = {}
 
 
