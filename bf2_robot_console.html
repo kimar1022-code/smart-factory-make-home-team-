@@ -271,7 +271,7 @@ textarea{width:100%;min-height:220px;font:18px var(--mono);border:1px solid #3A4
       <button id="dock-tab-rec"   onclick="dockMode('rec')"   title="자세 캡처·순차 재생 레코더">리코더</button>
       <button onclick="dockReload()" title="새로고침">⟳</button>
     </span></h2>
-  <div id="dock-cycle"><iframe id="cycleframe" style="width:100%;height:640px;border:1px solid var(--line);border-radius:6px;background:#111"></iframe></div>
+  <div id="dock-cycle"><iframe id="cycleframe" style="width:100%;height:640px;border:1px solid var(--line);border-radius:6px;background:#111;display:block"></iframe></div>
   <div id="dock-rec" style="display:none">
   <div class="inline"><input id="rec-name" value="Untitled" style="width:130px">
     <span id="rec-count" style="font:18px var(--mono);color:var(--muted)">0 스텝</span>
@@ -1199,11 +1199,17 @@ function dockMode(m){
   C.style.display=on?'':'none'; R.style.display=on?'none':'';
   $('dock-title').textContent=on?'사이클':'RECORDER';
   if(tc)tc.className=on?'primary':''; if(tr)tr.className=on?'':'primary';
-  if(on){var f=$('cycleframe'); if(!f.src)f.src='http://'+(location.hostname||'localhost')+':8776/';}
+  if(on){var f=$('cycleframe'); if(!f.src)f.src='http://'+(location.hostname||'localhost')+':8776/'; dockFit();}
 }
+/* 사이클 화면을 리코더처럼 아래끝까지 — 남는 높이를 전부 준다 */
+function dockFit(){var f=$('cycleframe'); if(!f)return;
+  if($('dock-cycle').style.display==='none')return;
+  var t=f.getBoundingClientRect().top;
+  f.style.height=Math.max(520, Math.round(window.innerHeight-t-14))+'px';}
+window.addEventListener('resize',dockFit);
 function dockReload(){var m=(localStorage.getItem('dock.mode')||'cycle');
   if(m==='cycle'){var f=$('cycleframe');f.src='http://'+(location.hostname||'localhost')+':8776/?t='+Date.now();}else{try{recRefresh&&recRefresh()}catch(e){}}}
-window.addEventListener('load',function(){try{dockMode(localStorage.getItem('dock.mode')||'cycle')}catch(e){dockMode('cycle')}});
+window.addEventListener('load',function(){try{dockMode(localStorage.getItem('dock.mode')||'cycle')}catch(e){dockMode('cycle')}setTimeout(dockFit,300);});
 
 /* 8/26 카메라 플로팅 패널 2종(손목캠 :8766 · 측면캠 :8771 · 새카메라 :8768) — 이동/크기/빼기·넣기/별창, 위치·크기·표시 localStorage 기억 */
 function camPanel(id,btnId,label,streamUrl,def){
