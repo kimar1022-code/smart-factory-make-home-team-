@@ -1657,8 +1657,11 @@ def snapshot():
 PAGE = r"""<!doctype html><meta charset=utf-8><title>HOUSE CYCLE</title>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <style>/* ★9/8: 로그(pre)만 키움 — 나머지는 원래 크기 */
-body{font:16px system-ui;margin:12px;background:#111;color:#eee}button{margin:2px;padding:7px 12px;font-size:16px}
-.big{font-size:20px;padding:11px 18px}.st{font-size:24px;margin:6px 0}.ok{color:#5f5}.no{color:#f66}.wait{color:#fc3}
+body{font:16px system-ui;margin:12px;background:#111;color:#eee}
+/* ★9/12 사용자 지시: 중요 버튼(.big)만 크게, 나머지는 전부 같은 크기로 — 글자 길이와 무관하게 폭 통일 */
+button{margin:3px;padding:9px 10px;font-size:16px;min-width:200px;max-width:200px;min-height:46px;
+       white-space:normal;line-height:1.2;text-align:center;vertical-align:top;overflow-wrap:anywhere}
+.big{font-size:20px;padding:12px 16px;min-width:310px;max-width:310px;min-height:62px;font-weight:700}.st{font-size:24px;margin:6px 0}.ok{color:#5f5}.no{color:#f66}.wait{color:#fc3}
 select,input{font-size:16px;padding:4px}
 /* ★9/8: 색 선택은 크게, 버튼은 기능별로 색을 나눠 구분 */
 #color{font-size:26px;font-weight:800;padding:8px 14px;background:#222;color:#fff;
@@ -1676,8 +1679,8 @@ button:hover{filter:brightness(1.25)}
    손가락으로 누르는 화면이라 버튼을 키우고, 로그·표는 가로로 넘치지 않게 각자 스크롤시킨다. */
 @media (max-width:820px){
   body{margin:8px;font-size:18px}
-  button{font-size:19px;padding:12px 16px;margin:3px 2px}
-  .big{font-size:21px;padding:15px 20px;width:100%;box-sizing:border-box}
+  button{font-size:19px;padding:12px 16px;margin:3px 2px;min-width:0;max-width:none;width:100%;box-sizing:border-box}
+  .big{font-size:21px;padding:15px 20px;width:100%;min-width:0;max-width:none;box-sizing:border-box}
   .st{font-size:22px}
   select,input{font-size:19px;padding:9px}
   pre{height:260px;font-size:22px}
