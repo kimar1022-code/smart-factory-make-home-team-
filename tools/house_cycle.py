@@ -583,6 +583,43 @@ def rack_axes(e, Jinv):
     return u, np.array([-u[1], u[0]])
 
 
+# ★9/12 사용자 지시: "점 세 개인데 2개만 보이면 밑으로 살짝 위로 살짝 왔다 갔다 하며 점을 찾아라".
+#   가운데 점을 못 보면 '끝점 중점' 으로 물러나는데, 점 간격이 불균등해(9/6 실측 38.8/53.5/63.1/29.7mm)
+#   파지점이 벽 아래쪽으로 치우친다 — 빨강에서 "너무 밑에 잡힌다" 로 나타났다.
+#   반사광이 점을 지우는 경우가 많아 카메라를 벽 축으로 조금만 옮겨도 점이 살아난다.
+RACK_MIDDOT_NUDGE_MM = (6.0, -6.0, 12.0, -12.0)   # 벽 축(화면 위·아래) 탐색 폭 — 작게, 번갈아
+
+
+def rack_middot_search(color, e, rr, rp, Jinv, L0, dxy):
+    """가운데 점이 안 잡혀 '끝점 중점' 으로 물러난 경우에만, 카메라를 벽 축으로 ±조금 오가며 다시 본다.
+    찾으면 (그 측정, 그 자리의 카메라 오프셋) — 못 찾으면 원래 자리로 돌아와 받은 값 그대로 돌려준다(게이트 완화 아님)."""
+    want = PC.WALL_DOT_N.get(color)
+    if not want or e.get("grip_mode") == "mid_dot":
+        return e, dxy
+    ua, _ux = rack_axes(e, Jinv)
+    home = list(PC.st()["tcp"]); J = np.linalg.inv(Jinv)
+    log(f"  가운데 점 미검출(점 {e.get('n_dots','?')}/{want}) → 벽 축으로 "
+        f"±{max(RACK_MIDDOT_NUDGE_MM):.0f}mm 오가며 가운데 점 재탐색")
+    for mm in RACK_MIDDOT_NUDGE_MM:
+        PC.speed(spd_move())
+        move([home[0] + float(ua[0]) * mm, home[1] + float(ua[1]) * mm, home[2]] + home[3:],
+             tag=f"가운데 점 탐색 {mm:+.0f}mm")
+        time.sleep(0.4)
+        cur = PC.st()["tcp"]; d2 = (cur[0] - rp[0], cur[1] - rp[1])
+        e2, n2, _ = rack_measure(color, L0, rr["Pc0"][0] + float((J @ np.array(d2))[0]))
+        if not e2:
+            log(f"    {mm:+.0f}mm: 측정 실패"); continue
+        okl = abs(e2["len_px"] - L0) <= RACK_LEN_TOL * L0
+        log(f"    {mm:+.0f}mm: 점 {e2.get('n_dots','?')}개 길이 {e2['len_px']:.0f}px "
+            f"기준={'가운데 점' if e2.get('grip_mode') == 'mid_dot' else '끝점 중점'}")
+        if e2.get("grip_mode") == "mid_dot" and okl:
+            log(f"  ✅ 가운데 점 확보({mm:+.0f}mm 자리) — 파지점 {e['mid'][1]:.0f}px → {e2['mid'][1]:.0f}px")
+            return e2, d2
+    PC.speed(spd_move()); move(home, tag="가운데 점 탐색 실패 → 원위치")
+    log("  가운데 점 못 찾음 — 끝점 중점으로 진행(파지점이 아래로 치우칠 수 있음)")
+    return e, dxy
+
+
 # ★9/7 실측(red_s, 노출 500 에서 10회): 5회가 끝점 하나를 놓쳐 길이 362→274/185px 로 줄고 중앙이 44~89px 밀린다.
 #   길이 10% 게이트는 274px 은 걸러도 341px(-5.4%) 은 통과시켜 파지점을 3.3mm 틀리게 잡았다.
 #   → 기준 길이 ±RACK_LEN_TOL 에 드는 측정만 모아 중앙값을 쓴다(채택 5회 산포 x0.6 y1.1px).
@@ -706,6 +743,7 @@ def stage_rack(color, teach_rack=False):
         raise Gate("랙에서 벽 양끝을 못 잡음 — 벽이 뒤집혔거나 점 가림. 랙에 다시 놓기")
     if abs(e["len_px"] - L0) > RACK_LEN_TOL * L0:
         raise Gate(f"벽 길이 불일치 {e['len_px']:.0f}px vs 기준 {L0:.0f}px ({(e['len_px']-L0)/L0*100:+.1f}%) — 끝점 미검출, 파지 금지")
+    e, dxy = rack_middot_search(color, e, rr, rp, Jinv, L0, dxy)   # ★9/12 가운데 점 재탐색(위·아래 조금씩)
     if abs(dxy[0]) + abs(dxy[1]) > 0.5:
         log(f"  (랙 재관측 카메라 오프셋 Δ ({dxy[0]:+.1f},{dxy[1]:+.1f})mm 반영)")
     # 15:39 실기: 양끝 p1/p2 순서가 x 몇 px 차이로 뒤집혀 각 +178° (방향 반전) → '삐뚤게 놓임' 오판. 벽은 방향 없는 선분:
