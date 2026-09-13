@@ -79,8 +79,22 @@ def grip_read():
     return str(post("grip_read", {"dry_run": True})["result"])
 
 
+GRIP_SAME_TOL = 2          # ★9/13: 실측이 목표와 이만큼 안이면 '이미 그 상태' 로 보고 명령을 보내지 않는다
+
 def gripper(pos):
-    post("gripper", {"pos": int(pos), "dry_run": False}); wait_idle(); time.sleep(0.6)
+    """★9/13 사고: 이미 열려 있는 그리퍼(30)에 또 '열기 30' 을 보내 409 Conflict →
+    컨트롤러 앱 사망(controller_dead, 전원 재투입만이 해법). 9/10 에 함정으로 기록해 두고도
+    코드로 막지 않아 오늘 재발했다. 그리퍼는 제어 루프를 2~5초 점유하므로 불필요한 명령 자체가 위험.
+    → 목표와 실측이 GRIP_SAME_TOL 안이면 **명령을 생략**하고 실측을 그대로 돌려준다."""
+    want = int(pos)
+    try:
+        cur = int(float(grip_read()))
+    except Exception:
+        cur = None
+    if cur is not None and abs(cur - want) <= GRIP_SAME_TOL:
+        print(f"  (그리퍼 이미 {cur} ≈ 목표 {want} — 명령 생략, 409 방지)", flush=True)
+        return str(cur)
+    post("gripper", {"pos": want, "dry_run": False}); wait_idle(); time.sleep(0.6)
     return grip_read()
 
 
