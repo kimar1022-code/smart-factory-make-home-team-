@@ -31,7 +31,7 @@
 /dev/serial/by-path/pci-0000:00:14.0-usb-0:7:1.0-port0
 ```
 
-`/dev/ttyUSB0` 같은 번호는 USB 재삽입 순서에 따라 바뀔 수 있다. 위 경로는 **현재 꽂힌 USB 물리 포트 기준**이다. PC 다른 USB 구멍으로 옮기거나 1·2호기를 같이 연결한 뒤에는 아래 명령으로 반드시 다시 확인한다.
+`/dev/ttyUSB0` 같은 번호는 USB 재삽입 순서에 따라 바뀔 수 있다. 위 경로는 **현재 꽂힌 USB 물리 포트 기준**이다. PC 다른 USB 구멍으로 옮기거나 1 · 2호기를 같이 연결한 뒤에는 아래 명령으로 반드시 다시 확인한다.
 
 ```bash
 ls -l /dev/serial/by-path /dev/ttyUSB*
@@ -83,7 +83,7 @@ ls -l /dev/serial/by-path /dev/ttyUSB*
 - `X0/X1/X2` 모두 OFF
 - 원점 플래그 A1/A2/A3 ON
 
-또한 `zk_startup.py`도 원점 플래그만 보지 않고 실제 각도와 리밋을 함께 확인한다. `--check` 모드는 펌프·밸브가 ON이어도 더 이상 출력 OFF 명령을 내리지 않는다.
+또한 `zk_startup.py`도 원점 플래그만 보지 않고 실제 각도와 리밋을 함께 확인한다. `--check` 모드는 펌프 · 밸브가 ON이어도 더 이상 출력 OFF 명령을 내리지 않는다.
 
 ### 실제 리밋 탈출 기록
 
@@ -170,7 +170,7 @@ python3 zk_home_run.py
 
 ## 9. 아직 하지 않은 항목
 
-- 펌프/밸브(Y14/Y15) 실제 흡착·해제 시험
+- 펌프/밸브(Y14/Y15) 실제 흡착 · 해제 시험
 - 2호기 전체 관절 가동범위 및 소프트리밋 실측
 - 2호기 작업 자세 저장 및 반복정밀도 측정
 - 2호기 픽앤플레이스 사이클
@@ -184,7 +184,7 @@ python3 zk_home_run.py
 - `zkfx.py`: 환경변수 기반 기본 포트 지원
 - `zk_pose.py`: 2호기 실측 3축 비트, 별도 poses 파일, 단일축 시험 명령
 - `zk_home_run.py`: 원점복귀 조기완료 방지 조건
-- `zk_startup.py`: 실제 각도·리밋 기반 준비 판정, 완전 읽기 전용 `--check`, 2호기 포트 전달
+- `zk_startup.py`: 실제 각도 · 리밋 기반 준비 판정, 완전 읽기 전용 `--check`, 2호기 포트 전달
 - `zk_escape_limit.py`: 2호기 포트와 실측 비트 적용
 - `zk_stall_diag.py`, `zk_hmi_diff.py`, `zk_seek_limit.py`, `zk_shutdown.py`, `zk_status.py`: 2호기 전용 경로 또는 포트 적용
 
