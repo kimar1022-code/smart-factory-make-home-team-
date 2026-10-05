@@ -2,7 +2,7 @@
 
 Robot Control / FR5 · ZeKeep 영역의 상세 기술 문서입니다.
 
-| 번호 | 문서 | 내용 | 상태 |
+| 번호 <img src="../docs/images/layout/w100.png" width="100%" height="1"> | 문서 <img src="../docs/images/layout/w400.png" width="100%" height="1"> | 내용 <img src="../docs/images/layout/w500.png" width="100%" height="1"> | 상태 <img src="../docs/images/layout/w100.png" width="100%" height="1"> |
 |:---:|:---|:---|:---:|
 | 01 | [프로젝트 개요](01_overview.md) | 배경, 문제 정의, 개발 목적, 담당 영역의 역할 | 작성 완료 |
 | 02 | [시스템 아키텍처](02_architecture.md) | 3계층 구조와 타 영역 연동 구조 | 작성 완료 |
