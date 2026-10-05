@@ -22,7 +22,7 @@ FR5 6축 협동로봇이 벽을 집어 밑판 슬롯에 끼우고, ZeKeep 3축 �
 
 ## 최종 성과
 
-| 항목 <img src="docs/images/layout/w200.png" width="100%" height="1"> | 결과 <img src="docs/images/layout/w200.png" width="100%" height="1"> | 측정 방법 <img src="docs/images/layout/w400.png" width="100%" height="1"> |
+| 항목 <img src="docs/images/layout/w650.png" width="100%" height="1"> | 결과 <img src="docs/images/layout/w800.png" width="100%" height="1"> | 측정 방법 <img src="docs/images/layout/w1550.png" width="100%" height="1"> |
 | --- | --- | --- |
 | 벽 전량 삽입 | **5 / 5** · 하강 중 막힘 0건 | 한 회차 다섯 장 전부 삽입, 로그 `── DONE` 기준 |
 | 파지 재현 오차 | 1.7 mm → **0.13 mm** | 같은 벽 반복 파지 후 TCP 편차 |
@@ -115,7 +115,7 @@ FR5 6축 협동로봇이 벽을 집어 밑판 슬롯에 끼우고, ZeKeep 3축 �
 - 모의(sim) 어댑터로 전 시퀀스를 먼저 통과시킨 뒤 실물에 투입합니다 (`fr5_adapter_mock_test.py`).
 - 통신: CycloneDDS 유니캐스트(`config/cyclonedds_unicast.xml`), 팀 서버 도메인 73 · 글로벌캠 도메인 90.
 
-| 로봇 <img src="docs/images/layout/w100.png" width="100%" height="1"> | 역할 <img src="docs/images/layout/w300.png" width="100%" height="1"> | 제어 경로 <img src="docs/images/layout/w300.png" width="100%" height="1"> |
+| 로봇 <img src="docs/images/layout/w450.png" width="100%" height="1"> | 역할 <img src="docs/images/layout/w1150.png" width="100%" height="1"> | 제어 경로 <img src="docs/images/layout/w1400.png" width="100%" height="1"> |
 | --- | --- | --- |
 | FR5 6축 | 벽 파지 · 운반 · 삽입 · 완성품 출하 | `bridge_server` → Fairino SDK (Ethernet) |
 | ZeKeep 3축 ×2 | 밑판 · 지붕 흡착 반송 | `zk_*.py` → MODBUS-RTU → FX3U PLC (USB 시리얼) |
@@ -170,7 +170,7 @@ FR5 6축 협동로봇이 벽을 집어 밑판 슬롯에 끼우고, ZeKeep 3축 �
 <details>
 <summary><b>Q4. 반복 정밀도와 산포는요? 몇 회 검증했나요?</b></summary>
 
-| 항목 <img src="docs/images/layout/w200.png" width="100%" height="1"> | 값 <img src="docs/images/layout/w200.png" width="100%" height="1"> | 조건 <img src="docs/images/layout/w300.png" width="100%" height="1"> |
+| 항목 <img src="docs/images/layout/w800.png" width="100%" height="1"> | 값 <img src="docs/images/layout/w850.png" width="100%" height="1"> | 조건 <img src="docs/images/layout/w1350.png" width="100%" height="1"> |
 | --- | --- | --- |
 | 파지 재현 오차 | 1.7 mm → 0.13 mm | 같은 벽 반복 파지 후 TCP 편차 |
 | 파지 서명 산포 | 0.01 ~ 0.07 mm | 랙 위 · 그리퍼 문 상태에서만 측정 |
@@ -232,7 +232,7 @@ ZeKeep 은 제조사 문서도 SDK 도 없고 티칭 펜던트로만 움직이�
 
 ## 트러블슈팅
 
-| 증상 <img src="docs/images/layout/w300.png" width="100%" height="1"> | 진범 <img src="docs/images/layout/w900.png" width="100%" height="1"> | 해결 <img src="docs/images/layout/w500.png" width="100%" height="1"> |
+| 증상 <img src="docs/images/layout/w450.png" width="100%" height="1"> | 진범 <img src="docs/images/layout/w1600.png" width="100%" height="1"> | 해결 <img src="docs/images/layout/w950.png" width="100%" height="1"> |
 | --- | --- | --- |
 | 하강이 중간에 멈춤 | 런처가 손목캠 화이트밸런스를 5500 K 로 강제 주입(기본 4600 K) → 파랑 색점 면적 **1823 → 258** 붕괴 | WB 3중 고정(런처 · 자동복구 · 사이클 시작 점검) + 색별 서명 노출 |
 | 없는 점이 검출됨(유령점) | 오버레이를 소스 버퍼에 그려 **다음 프레임이 자기 그림을 재검출**. 자동 WB 미차단 | 검출은 원본 사본에서 · 반사상은 색이 아닌 배열 기하로 배제 |
@@ -249,7 +249,7 @@ ZeKeep 은 제조사 문서도 SDK 도 없고 티칭 펜던트로만 움직이�
 
 ## 핵심 파라미터
 
-| 파라미터 <img src="docs/images/layout/w200.png" width="100%" height="1"> | 값 <img src="docs/images/layout/w400.png" width="100%" height="1"> | 설명 <img src="docs/images/layout/w500.png" width="100%" height="1"> |
+| 파라미터 <img src="docs/images/layout/w450.png" width="100%" height="1"> | 값 <img src="docs/images/layout/w1100.png" width="100%" height="1"> | 설명 <img src="docs/images/layout/w1450.png" width="100%" height="1"> |
 | --- | --- | --- |
 | `HOVER_DZ` | 85 (외벽) / 100 (blue_in · yellow_in) / 102 (red_in) | 안착 높이 위 정렬 높이 (mm) |
 | `COMBINE_TOL_MM` | 1.5 | 두 카메라 XY 불일치 허용 |
@@ -313,7 +313,7 @@ python3 src/orchestrator/cell_orchestrator.py --ros-args -p exec_mode:=real
 #    http://<PC>:8776/                          벽 삽입 사이클 (하강 버튼은 사람이 누른다)
 ```
 
-| 포트 <img src="docs/images/layout/w200.png" width="100%" height="1"> | 서비스 <img src="docs/images/layout/w300.png" width="100%" height="1"> | 파일 <img src="docs/images/layout/w300.png" width="100%" height="1"> |
+| 포트 <img src="docs/images/layout/w750.png" width="100%" height="1"> | 서비스 <img src="docs/images/layout/w1150.png" width="100%" height="1"> | 파일 <img src="docs/images/layout/w1150.png" width="100%" height="1"> |
 | --- | --- | --- |
 | 8765 | FR5 브리지 | `src/bridge/bridge_server.py` |
 | 8766 / 8768 / 8771 / 8779 | 손목 D435 / 보조 / 측면 / 글로벌 카메라 | `src/cameras/` |
