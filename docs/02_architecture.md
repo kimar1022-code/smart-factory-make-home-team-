@@ -26,9 +26,7 @@ flowchart TB
     UN["Unity 디지털 트윈"]
   end
 
-  S1 -->|"/cell/execute_task (Action)"| ORC
-  S1 -->|"/cell/control (Service)"| ORC
-  ORC -->|"/cell/status 1Hz · /cell/event"| S1
+  S1 <-->|"/cell/execute_task (Action) · /cell/control (Service)<br/>/cell/status 1Hz · /cell/event"| ORC
   ORC -->|"/fr5/joint_states 30Hz"| UN
   CAM -->|"글로벌캠 UDP 21030"| UN
   ORC --> BR
