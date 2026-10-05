@@ -2,40 +2,7 @@
 
 ## 3계층 구조
 
-```mermaid
-flowchart TB
-  subgraph SV["서버 · FMS (유예린 파트)"]
-    S1["생산 Job 분배<br/>12단계 공정 오케스트레이션"]
-  end
-
-  subgraph CELL["로봇셀 PC (이 파트)"]
-    ORC["cell_orchestrator<br/>task → phase 시퀀스 · 상태기계 · 오류코드"]
-    HC["house_cycle (:8776)<br/>벽 삽입 파이프라인 · 비전 보정"]
-    BR["bridge_server (:8765)<br/>FR5 명령 단일 창구"]
-    CAM["카메라 4대<br/>손목 D435 · 보조 · 측면 · 글로벌"]
-    ZK["zk_*.py<br/>ZeKeep PLC 제어"]
-    CON["운영 콘솔 (:8000)<br/>조그 · 기록/재생 · 관절 트윈"]
-  end
-
-  subgraph ROB["실물"]
-    FR5["FR5 6축<br/>Ethernet 192.168.58.2"]
-    ZKR["ZeKeep 3축 ×2<br/>FX3U PLC"]
-  end
-
-  subgraph GUI["관제 (김영호 파트)"]
-    UN["Unity 디지털 트윈"]
-  end
-
-  S1 <-->|"/cell/execute_task (Action) · /cell/control (Service)<br/>/cell/status 1Hz · /cell/event"| ORC
-  ORC -->|"/fr5/joint_states 30Hz"| UN
-  CAM -->|"글로벌캠 UDP 21030"| UN
-  ORC --> BR
-  HC --> BR
-  CON --> BR
-  HC <--> CAM
-  BR --> FR5
-  ORC --> ZK --> ZKR
-```
+<img src="images/cell_architecture.png" alt="로봇셀 구성도" width="100%" />
 
 | 계층 | 담당 | 바뀌는 조건 |
 |---|---|---|
